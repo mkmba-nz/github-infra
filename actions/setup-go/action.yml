@@ -25,6 +25,7 @@ runs:
       with:
         # If neither go-version nor dockerfile is provided, use a default production go version.
         go-version: ${{ inputs.go-version || steps.extract-version.outputs.extracted_version || '1.23' }}
+        check-latest: true
 
     - name: Set GOTOOLCHAIN
       shell: bash
