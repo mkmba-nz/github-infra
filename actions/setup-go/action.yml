@@ -16,8 +16,9 @@ runs:
       if: inputs.dockerfile != ''
       id: extract-version
       shell: bash
+      # NOTE: uses only the first version found in the Dockerfile... maybe warn if multiple?
       run: |
-        GO_VERSION=$(grep -E '^FROM golang:' ${{ inputs.dockerfile }} | cut -d ':' -f 2 | cut -d ' ' -f 1)
+        GO_VERSION=$(grep -E '^FROM golang:' ${{ inputs.dockerfile }} | cut -d ':' -f 2 | cut -d ' ' -f 1 | head -n 1)
         echo "extracted_version=${GO_VERSION}" >> "$GITHUB_OUTPUT"
 
     - name: Setup Go
