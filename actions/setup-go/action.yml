@@ -14,16 +14,17 @@ runs:
   steps:
     - name: Extract Go version from Dockerfile
       if: inputs.dockerfile != ''
+      id: extract-version
       shell: bash
       run: |
         GO_VERSION=$(grep -E '^FROM golang:' ${{ inputs.dockerfile }} | cut -d ':' -f 2 | cut -d ' ' -f 1)
-        echo "extracted_version=${GO_VERSION}" >> $GITHUB_ENV
+        echo "extracted_version=${GO_VERSION}" >> "$GITHUB_OUTPUT"
 
     - name: Setup Go
       uses: actions/setup-go@v4
       with:
         # If neither go-version nor dockerfile is provided, use a default production go version.
-        go-version: ${{ inputs.go-version || env.extracted_version || '1.23' }}
+        go-version: ${{ inputs.go-version || steps.extract-version.outputs.extracted_version || '1.23' }}
 
     - name: Set GOTOOLCHAIN
       shell: bash
