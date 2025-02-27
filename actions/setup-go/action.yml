@@ -26,6 +26,10 @@ runs:
         # If neither go-version nor dockerfile is provided, use a default production go version.
         go-version: ${{ inputs.go-version || steps.extract-version.outputs.extracted_version || '1.23' }}
         check-latest: true
+        cache: true
+        cache-dependency-path: :-
+          "${{ github.workspace }}/**/go.sum"
+          "go.sum"
 
     - name: Set GOTOOLCHAIN
       shell: bash
