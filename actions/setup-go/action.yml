@@ -1,0 +1,30 @@
+name: 'MKMBA setup-go'
+description: 'Sets up Go with MKMBA defaults and Dockerfile version extraction'
+
+inputs:
+  go-version:
+    description: 'Override default or dockerfile extract Go version. (Last resort!)'
+    required: false
+  dockerfile:
+    description: 'Use a go version matching the golang image in the specified Dockerfile'
+    required: false
+
+runs:
+  using: composite
+  steps:
+    - name: Extract Go version from Dockerfile
+      if: inputs.dockerfile != ''
+      shell: bash
+      run: |
+        GO_VERSION=$(grep -E '^FROM golang:' ${{ inputs.dockerfile }} | cut -d ':' -f 2 | cut -d ' ' -f 1)
+        echo "extracted_version=${GO_VERSION}" >> $GITHUB_ENV
+
+    - name: Setup Go
+      uses: actions/setup-go@v4
+      with:
+        # If neither go-version nor dockerfile is provided, use a default production go version.
+        go-version: ${{ inputs.go-version || env.extracted_version || '1.23' }}
+
+    - name: Set GOTOOLCHAIN
+      shell: bash
+      run: echo "GOTOOLCHAIN=local" >> $GITHUB_ENV
