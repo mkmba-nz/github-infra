@@ -42,8 +42,8 @@ jobs:
         run: CGO_ENABLED=1 go install -tags extended,withdeploy github.com/gohugoio/hugo@latest
       - name: Install Node.js dependencies
         run: |
-          [ -f package.json ] && npm ci
-          [ -f themes/default/package.json ]&& cd themes/default && npm ci
+          [ -f package.json ] && npm ci || /bin/true
+          [ -f themes/default/package.json ]&& cd themes/default && npm ci || /bin/true
       - name: Build with Hugo
         env:
           # For maximum backward compatibility with Hugo modules
