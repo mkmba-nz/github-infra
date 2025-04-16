@@ -23,6 +23,7 @@ runs:
 
     - name: find go.sum
       id: go-sum
+      shell: bash
       run: |
         files=$(find "${{ github.workspace }}" -name go.sum)
         echo "paths<<EOF" >> $GITHUB_OUTPUT
