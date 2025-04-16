@@ -9,6 +9,9 @@ on:
       target:
         type: string
         default: "s3"
+      extra-args:
+        type: string
+        default: ""
       aws-region:
         type: string
         default: "us-east-1"
@@ -53,7 +56,7 @@ jobs:
           hugo \
             -e ${{ inputs.environment }} \
             --gc \
-            --minify
+            --minify ${{ inputs.extra-args }}
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ inputs.aws-role-arn }}
