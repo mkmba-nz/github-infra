@@ -1,0 +1,65 @@
+name: Deploy Hugo site to S3
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        default: "production"
+        type: string
+      target:
+        type: string
+        default: "s3"
+      aws-region:
+        type: string
+        default: "us-east-1"
+      aws-role-arn:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: "hugo-deploy-to-s3"
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build-and-deploy-to-s3:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - uses: mkmba-nz/github-infra/actions/setup-go@HEAD
+      - name: Install Hugo CLI
+        run: CGO_ENABLED=1 go install -tags extended,withdeploy github.com/gohugoio/hugo@latest
+      - name: Install Node.js dependencies
+        run: |
+          [ -f package.json ] && npm ci
+          [ -f themes/default/package.json ]&& cd themes/default && npm ci
+      - name: Build with Hugo
+        env:
+          # For maximum backward compatibility with Hugo modules
+          HUGO_ENVIRONMENT: ${{ inputs.environment }}
+          HUGO_ENV: ${{ inputs.environment }}
+        run: |
+          hugo \
+            -e ${{ inputs.environment }} \
+            --gc \
+            --minify
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.aws-role-arn }}
+          aws-region: ${{ inputs.aws-region }}
+      - name: Deploy
+        run: |
+          hugo \
+            -e ${{ inputs.environment }} \
+            deploy --target ${{ inputs.target }}
