@@ -31,7 +31,7 @@ runs:
         echo "EOF" >> $GITHUB_OUTPUT
 
     - name: Setup Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@v5
       with:
         # If neither go-version nor dockerfile is provided, use a default production go version.
         go-version: ${{ inputs.go-version || steps.extract-version.outputs.extracted_version || '1.23' }}
