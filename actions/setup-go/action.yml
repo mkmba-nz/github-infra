@@ -1,4 +1,4 @@
-name: 'MKMBA setup-go'
+name: 'MKMBA setup-go (test)'
 description: 'Sets up Go with MKMBA defaults and Dockerfile version extraction'
 
 inputs:
@@ -21,6 +21,20 @@ runs:
         GO_VERSION=$(grep -E '^FROM golang:' ${{ inputs.dockerfile }} | sed -E 's/^FROM golang:([0-9]+\.[0-9]+)(-.*)?.*$/\1/' | head -n 1)
         echo "extracted_version=${GO_VERSION}" >> "$GITHUB_OUTPUT"
 
+    - run: echo "HELLO!"
+    - run: ls -l
+    - run: pwd
+    - run: ls -l "${{ github.workspace }}"
+    - name: find go.sum
+      id: go-sum
+      run: |
+        files=$(find "${{ github.workspace }}" -name go.sum)
+        echo "paths<<EOF" >> $GITHUB_OUTPUT
+        echo "$files" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+        echo "Output =="
+        cat $GITHUB_OUTPUT
+        echo "End Output =="
     - name: Setup Go
       uses: actions/setup-go@v4
       with:
@@ -28,9 +42,7 @@ runs:
         go-version: ${{ inputs.go-version || steps.extract-version.outputs.extracted_version || '1.23' }}
         check-latest: true
         cache: true
-        cache-dependency-path: :-
-          "${{ github.workspace }}/**/go.sum"
-          "go.sum"
+        cache-dependency-path: ${{ steps.go-sum.outputs.paths }}
 
     - name: Set GOTOOLCHAIN
       shell: bash
