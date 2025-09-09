@@ -34,7 +34,7 @@ runs:
       uses: actions/setup-go@v5
       with:
         # If neither go-version nor dockerfile is provided, use a default production go version.
-        go-version: ${{ inputs.go-version || steps.extract-version.outputs.extracted_version || '1.23' }}
+        go-version: ${{ inputs.go-version || steps.extract-version.outputs.extracted_version || '1.25' }}
         check-latest: true
         cache: true
         cache-dependency-path: ${{ steps.go-sum.outputs.paths }}
