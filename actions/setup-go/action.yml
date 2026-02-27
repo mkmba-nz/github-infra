@@ -25,10 +25,15 @@ runs:
       id: go-sum
       shell: bash
       run: |
-        files=$(find "${{ github.workspace }}" -name go.sum)
-        echo "paths<<EOF" >> $GITHUB_OUTPUT
-        echo "$files" >> $GITHUB_OUTPUT
-        echo "EOF" >> $GITHUB_OUTPUT
+        files=$(find "${{ github.workspace }}" -name go.sum 2>/dev/null || true)
+        if [ -n "$files" ]; then
+          echo "paths<<EOF" >> $GITHUB_OUTPUT
+          echo "$files" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "enabled=true" >> $GITHUB_OUTPUT
+        else
+          echo "enabled=false" >> $GITHUB_OUTPUT
+        fi
 
     - name: Setup Go
       uses: actions/setup-go@v5
@@ -36,7 +41,7 @@ runs:
         # If neither go-version nor dockerfile is provided, use a default production go version.
         go-version: ${{ inputs.go-version || steps.extract-version.outputs.extracted_version || '1.25' }}
         check-latest: true
-        cache: true
+        cache: ${{ steps.go-sum.outputs.enabled == 'true' }}
         cache-dependency-path: ${{ steps.go-sum.outputs.paths }}
 
     - name: Set GOTOOLCHAIN
