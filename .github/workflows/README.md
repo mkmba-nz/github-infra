@@ -88,7 +88,8 @@ jobs:
     if: |
       !contains(github.event.pull_request.labels.*.name, 'skip-workflows') &&
       (contains(github.event.comment.body, '@mkmba-review-agent') ||
-       contains(github.event.comment.body, '@review-agent'))
+       contains(github.event.comment.body, '@review-agent')) &&
+       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
     uses: mkmba-nz/github-infra/.github/workflows/review-agent.yml@v1
     secrets: inherit
     with:
@@ -97,6 +98,14 @@ jobs:
 
 The @-mention filter lives in the consumer's `if:` rather than inside the
 shared workflow so that each repo can choose its own handles (or add more).
+
+The `author_association` check restricts re-review triggering to repo
+members and collaborators. **This matters most for public repos**: any
+logged-in GitHub user can post a comment on a public PR, and that comment
+body is embedded directly in the prompt. Without the filter, an outsider
+could inject arbitrary instructions into your review bot. In a private
+repo the filter is effectively a no-op (everyone with PR-comment access
+is at least a collaborator) but it doesn't hurt to include.
 
 ### Adding repo-specific guidance
 
