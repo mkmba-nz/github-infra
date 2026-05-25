@@ -1,0 +1,56 @@
+name: Review Gate
+description: |
+  Skips a check when the same check has already completed successfully for the
+  current pull-request HEAD commit. Useful for avoiding duplicate test runs
+  when a second review is submitted on an unchanged HEAD (e.g. a comment-driven
+  re-review).
+
+  Must be invoked from a workflow triggered by a pull_request event - it relies
+  on github.event.pull_request.head.sha.
+
+  Usage:
+    steps:
+      - uses: mkmba-nz/github-infra/review-gate@v1
+        id: gate
+      - if: steps.gate.outputs.should_skip != 'true'
+        run: ./bin/run-tests
+
+inputs:
+  check-name:
+    description: |
+      Name of the check to look up. Defaults to the current job name, which
+      is what you want when this action is the first step of the job whose
+      work it is gating.
+    required: false
+    default: ""
+
+outputs:
+  should_skip:
+    description: "'true' if the check should be skipped because it already passed for this commit"
+    value: ${{ steps.review-check.outputs.should_skip }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check for existing successful run
+      id: review-check
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        CHECK_NAME_INPUT: ${{ inputs.check-name }}
+      run: |
+        SHA="${{ github.event.pull_request.head.sha }}"
+        CHECK_NAME="${CHECK_NAME_INPUT:-$GITHUB_JOB}"
+
+        # Query check runs for this commit, filtering to our check name.
+        # Exclude the current run (which is in_progress) by filtering for
+        # completed + successful runs only.
+        SUCCESSFUL=$(gh api "repos/${{ github.repository }}/commits/${SHA}/check-runs" \
+          --jq "[.check_runs[] | select(.name == \"${CHECK_NAME}\" and .status == \"completed\" and .conclusion == \"success\")] | length")
+
+        if [ "$SUCCESSFUL" -gt 0 ]; then
+          echo "should_skip=true" >> $GITHUB_OUTPUT
+          echo "::notice::Check '${CHECK_NAME}' already passed for ${SHA::7} - skipping"
+        else
+          echo "::notice::No successful run of '${CHECK_NAME}' for ${SHA::7} - running"
+        fi
