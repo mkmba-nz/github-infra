@@ -91,11 +91,6 @@ on:
         required: false
         type: string
         default: "mkmba-review-agent[bot]"
-      claude-code-action-ref:
-        description: Pinned ref of anthropics/claude-code-action
-        required: false
-        type: string
-        default: v1.0.112
       anthropic-base-url:
         description: |
           Base URL for the Claude API gateway. Leave blank to use the
@@ -228,7 +223,7 @@ jobs:
 
       - name: Review Agent
         if: steps.decide.outputs.should_run == 'true'
-        uses: anthropics/claude-code-action@${{ inputs.claude-code-action-ref }}
+        uses: anthropics/claude-code-action@v1.0.112
         env:
           ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
           ANTHROPIC_AUTH_TOKEN: "${{ github.job }}-${{ github.repository }}"
