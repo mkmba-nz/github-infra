@@ -38,11 +38,18 @@ name: Review Agent (shared)
 #       if: |
 #         !contains(github.event.pull_request.labels.*.name, 'skip-workflows') &&
 #         (contains(github.event.comment.body, '@mkmba-review-agent') ||
-#          contains(github.event.comment.body, '@review-agent'))
+#          contains(github.event.comment.body, '@review-agent')) &&
+#          contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
 #       uses: mkmba-nz/github-infra/.github/workflows/review-agent.yml@v1
 #       secrets: inherit
 #       with:
 #         mode: requested
+#
+# The author_association check restricts triggering to repo members and
+# collaborators. This is essential in public repos - any logged-in user
+# can comment on a public PR, and the comment body is interpolated into
+# the prompt, so an outsider could otherwise inject instructions into
+# the review bot.
 #
 # bot-id and bot-name default to the org-wide mkmba-review-agent App, so
 # consumers don't normally need a `with:` block beyond `mode` for requested
