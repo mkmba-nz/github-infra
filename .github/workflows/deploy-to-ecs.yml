@@ -7,12 +7,22 @@ permissions:
 on:
   workflow_call:
     inputs:
+      role-to-assume:
+        required: true
+        type: string
       region:
+        required: true
+        type: string      
+      registry:
         required: true
         type: string
       repo-name:
-          required: true
-          type: string
+        required: true
+        type: string
+      wait-for-replication:
+        required: false
+        type: boolean
+        default: false
       cluster-name:
         required: true
         type: string
@@ -43,15 +53,16 @@ jobs:
     steps:
     - uses: aws-actions/configure-aws-credentials@v4
       with:
-        role-to-assume: arn:aws:iam::${{ vars.project_number }}:role/${{ vars.role_name}}
+        role-to-assume: ${{ inputs.role-to-assume }}
         aws-region: ${{ inputs.region }}
 
     - name: wait for ECR replication
       uses: siketyan/wait-for-ecr-replication-action@v1.1.4
-      if: ${{ inputs.region != 'us-east-2' }}
+      if: ${{ inputs.wait-for-replication }}
       with:
         image_tag: ${{ github.sha }}
-        repository_uri: ${{ vars.project_number }}.dkr.ecr.us-east-2.amazonaws.com/${{ inputs.repo-name }}
+        repository_name: ${{ inputs.repo-name }}
+        registry_id: ${{ inputs.registry }}
 
     - name: fetch current task definition
       run: |
@@ -61,7 +72,7 @@ jobs:
       id: render
       run: |
         cat template.json | \
-        jq 'setpath(["containerDefinitions", 0, "image"]; "${{ vars.project_number }}.dkr.ecr.${{ inputs.region }}.amazonaws.com/${{ inputs.repo-name }}:${{ github.sha }}")' | \
+        jq 'setpath(["containerDefinitions", 0, "image"]; "${{ inputs.registry }}.dkr.ecr.${{ inputs.region }}.amazonaws.com/${{ inputs.repo-name }}:${{ github.sha }}")' | \
         jq 'setpath(["family"]; "${{ inputs.task-family }}") | delpaths([["taskDefinitionArn"],["registeredAt"],["registeredBy"]])' \
         > task-definition.json
         cat task-definition.json
@@ -80,6 +91,7 @@ jobs:
       run: |
         aws ssm put-parameter --name /${{ inputs.parameter-prefix != '' && inputs.parameter-prefix || inputs.task-family }}/image_tag --type String --value ${{ github.sha }} --overwrite
 
+    # TODO: make this work with cross-account registries (role assumption!)
     - name: add deployment tag to image in ECR as a docker tag
       if: ${{ inputs.deployed-to-env != '' }}
       run: |

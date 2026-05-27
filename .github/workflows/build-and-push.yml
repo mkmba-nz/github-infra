@@ -6,6 +6,12 @@ permissions:
 on:
   workflow_call:
     inputs:
+      role-to-assume:
+        required: true
+        type: string
+      region:
+        required: true
+        type: string
       registries:
         required: false
       repo-name:
@@ -20,6 +26,10 @@ on:
       build-args:
         required: false
         type: string
+      platforms:
+        required: false
+        type: string
+        default: linux/amd64
 
 jobs:
   build-and-push:
@@ -28,8 +38,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::${{ vars.project_number }}:role/${{ vars.role_name }}
-          aws-region: us-east-2
+          role-to-assume: ${{ inputs.role-to-assume }}
+          aws-region: ${{ inputs.region }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -38,7 +48,7 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
         with:
-          reigstries: ${{ inputs.registries }}
+          registries: ${{ inputs.registries }}
 
       - name: Build, tag, and push docker image to Amazon ECR
         uses: docker/build-push-action@v6
@@ -47,7 +57,7 @@ jobs:
           target: ${{ inputs.target }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          platforms: linux/amd64
+          platforms: ${{ inputs.platforms }}
           build-args: ${{ inputs.build-args }}
           push: true
           tags: ${{ steps.login-ecr.outputs.registry }}/${{ inputs.repo-name }}:${{ github.sha }}
