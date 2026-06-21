@@ -59,7 +59,11 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           platforms: ${{ inputs.platforms }}
-          build-args: ${{ inputs.build-args }}
+          # Inject the RO GITHUB_PAT to Docker, so private go modules can be
+          # fetched during builds.
+          build-args: |
+            ${{ inputs.build-args }}
+            GITHUB_PAT=${{ secrets.GIT_PAT }}
           push: true
           tags: ${{ steps.login-ecr.outputs.registry }}/${{ inputs.repo-name }}:${{ github.sha }}
           github-token: ${{ secrets.GIT_PAT }}
