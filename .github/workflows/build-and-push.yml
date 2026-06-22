@@ -21,6 +21,10 @@ on:
       context:
         required: true
         type: string
+      file:
+        required: false
+        type: string
+        description: "path to the Dockerfile (relative to the workspace root); defaults to <context>/Dockerfile."
       target:
         required: false
         type: string
@@ -31,6 +35,17 @@ on:
         required: false
         type: string
         default: linux/amd64
+      cache-mounts:
+        required: false
+        type: string
+        description: |
+          Opt-in persistence of BuildKit `RUN --mount=type=cache` mounts across runs (the
+          `type=gha` layer cache does NOT cover these). A JSON cache-map mapping a host
+          directory to each mount target in the Dockerfile, e.g.
+            {"go-build-cache": "/root/.cache/go-build", "go-mod-cache": "/go/pkg"}
+          Leave blank (default) to skip entirely - simple callers run no extra steps.
+          Only worthwhile when the Dockerfile actually uses those cache mounts and the
+          build layer using them is invalidated often (e.g. a Go build on every source change).
 
 jobs:
   build-and-push:
@@ -51,13 +66,46 @@ jobs:
         with:
           registries: ${{ inputs.registries }}
 
+      # The following two steps only run when `cache-mounts` is set; they persist the
+      # contents of BuildKit `RUN --mount=type=cache` mounts (which the type=gha layer
+      # cache below does not), so e.g. Go module/build caches survive between runs.
+      - name: Resolve cache-mount host directories
+        id: cache-mounts
+        if: ${{ inputs.cache-mounts != '' }}
+        run: |
+          {
+            echo "dirs<<EOF"
+            echo '${{ inputs.cache-mounts }}' | jq -r 'keys[]'
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Restore BuildKit cache mounts
+        if: ${{ inputs.cache-mounts != '' }}
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.cache-mounts.outputs.dirs }}
+          # github.sha rolls the key every run so the restored cache is always re-saved
+          # with new entries (actions/cache never updates an existing key); restore-keys
+          # falls back to the most recent prior cache for this image.
+          key: ${{ runner.os }}-cache-mounts-${{ inputs.repo-name }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-cache-mounts-${{ inputs.repo-name }}-
+
+      - name: Inject cache mounts into BuildKit
+        if: ${{ inputs.cache-mounts != '' }}
+        uses: reproducible-containers/buildkit-cache-dance@v3.4.0
+        with:
+          dockerfile: ${{ inputs.file != '' && inputs.file || format('{0}/Dockerfile', inputs.context) }}
+          cache-map: ${{ inputs.cache-mounts }}
+
       - name: Build, tag, and push docker image to Amazon ECR
         uses: docker/build-push-action@v6
         with:
           context: ${{ inputs.context }}
+          file: ${{ inputs.file }}
           target: ${{ inputs.target }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ inputs.repo-name }}
+          cache-to: type=gha,mode=max,scope=${{ inputs.repo-name }}
           platforms: ${{ inputs.platforms }}
           # Inject the RO GITHUB_PAT to Docker, so private go modules can be
           # fetched during builds.
