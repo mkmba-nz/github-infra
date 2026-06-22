@@ -23,6 +23,10 @@ on:
         required: false
         type: boolean
         default: false
+      source-region:
+        required: false
+        type: string
+        description: "region of the source ECR repository to check replication status against; defaults to 'region' if blank."
       cluster-name:
         required: true
         type: string
@@ -57,12 +61,53 @@ jobs:
         aws-region: ${{ inputs.region }}
 
     - name: wait for ECR replication
-      uses: siketyan/wait-for-ecr-replication-action@v1.1.4
       if: ${{ inputs.wait-for-replication }}
-      with:
-        image_tag: ${{ github.sha }}
-        repository_name: ${{ inputs.repo-name }}
-        registry_id: ${{ inputs.registry }}
+      env:
+        REPOSITORY_NAME: ${{ inputs.repo-name }}
+        IMAGE_TAG: ${{ github.sha }}
+        REGISTRY_ID: ${{ inputs.registry }}
+        # we deploy from the destination region's copy, so we only care that
+        # replication into this region (DEST_REGION) has completed.
+        DEST_REGION: ${{ inputs.region }}
+        # replication status must be queried against the *source* repository's region,
+        # which may differ from the deployment region; defaults to the deploy region.
+        SOURCE_REGION: ${{ inputs.source-region != '' && inputs.source-region || inputs.region }}
+      run: |
+        set -euo pipefail
+        timeout=300        # max seconds to wait
+        interval=3         # seconds between polls
+        elapsed=0
+
+        while true; do
+          # filter to the replication destination matching the region we deploy to
+          statuses=$(aws ecr describe-image-replication-status \
+            --repository-name "$REPOSITORY_NAME" \
+            --image-id imageTag="$IMAGE_TAG" \
+            --region "$SOURCE_REGION" \
+            ${REGISTRY_ID:+--registry-id "$REGISTRY_ID"} \
+            --query "replicationStatuses[?region=='${DEST_REGION}'].status" \
+            --output text)
+
+          echo "Replication status for ${DEST_REGION}: ${statuses:-<none yet>}"
+
+          if echo "$statuses" | grep -qw FAILED; then
+            echo "::error::ECR replication to ${DEST_REGION} failed"
+            exit 1
+          fi
+
+          # destination for DEST_REGION exists and is no longer in progress
+          if [ -n "$statuses" ] && ! echo "$statuses" | grep -qw IN_PROGRESS; then
+            echo "Replication to ${DEST_REGION} complete."
+            break
+          fi
+
+          if [ "$elapsed" -ge "$timeout" ]; then
+            echo "::error::Timed out after ${timeout}s waiting for replication to ${DEST_REGION}"
+            exit 1
+          fi
+          sleep "$interval"
+          elapsed=$((elapsed + interval))
+        done
 
     - name: fetch current task definition
       run: |
