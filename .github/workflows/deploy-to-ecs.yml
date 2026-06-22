@@ -71,8 +71,10 @@ jobs:
     - name: render updated definition
       id: render
       run: |
+        repo="${{ inputs.registry }}.dkr.ecr.${{ inputs.region }}.amazonaws.com/${{ inputs.repo-name }}"
         cat template.json | \
-        jq 'setpath(["containerDefinitions", 0, "image"]; "${{ inputs.registry }}.dkr.ecr.${{ inputs.region }}.amazonaws.com/${{ inputs.repo-name }}:${{ github.sha }}")' | \
+        jq --arg repo "$repo" --arg sha "${{ github.sha }}" \
+          '.containerDefinitions |= map(if (.image | startswith($repo + ":")) then .image = $repo + ":" + $sha else . end)' | \
         jq 'setpath(["family"]; "${{ inputs.task-family }}") | delpaths([["taskDefinitionArn"],["registeredAt"],["registeredBy"]])' \
         > task-definition.json
         cat task-definition.json
