@@ -31,12 +31,17 @@ on:
         required: true
         type: string
       task-family:
-        required: true
+        required: false
         type: string
+        description: "[deprecated] single task family to deploy; use this together with service-name, or use task-families for multiple."
+      task-families:
+        required: false
+        type: string
+        description: "multiple families to deploy, one 'family[:service]' entry per line (or comma separated). When set, fetch/render/deploy run for each entry and service-name is ignored. A service, when present, is waited on for stability."
       service-name:
         required: false
         type: string
-        description: "service name to deploy to; if present will wait for stability; leave blank to only push the taskdef."
+        description: "[deprecated] service name to deploy to (single-family mode); if present will wait for stability; leave blank to only push the taskdef."
       parameter-prefix:
         required: false
         type: string
@@ -109,34 +114,101 @@ jobs:
           elapsed=$((elapsed + interval))
         done
 
-    - name: fetch current task definition
+    - name: resolve task families
+      id: families
+      env:
+        TASK_FAMILY: ${{ inputs.task-family }}
+        SERVICE_NAME: ${{ inputs.service-name }}
+        TASK_FAMILIES: ${{ inputs.task-families }}
       run: |
-        aws ecs describe-task-definition --task-definition ${{ inputs.task-family }}-template --query taskDefinition > template.json
+        set -euo pipefail
+        if [ -n "${TASK_FAMILIES}" ]; then
+          # accept newline and/or comma separated 'family[:service]' entries
+          list=$(printf '%s\n' "${TASK_FAMILIES}" | tr ',' '\n' \
+            | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' || true)
+        elif [ -n "${TASK_FAMILY}" ]; then
+          if [ -n "${SERVICE_NAME}" ]; then
+            list="${TASK_FAMILY}:${SERVICE_NAME}"
+          else
+            list="${TASK_FAMILY}"
+          fi
+        else
+          echo "::error::either task-family or task-families must be provided"
+          exit 1
+        fi
 
-    - name: render updated definition
-      id: render
+        if [ -z "${list}" ]; then
+          echo "::error::no task families resolved from inputs"
+          exit 1
+        fi
+
+        # primary family (first entry, family part only) used for SSM defaulting
+        primary=$(printf '%s\n' "${list}" | head -n1 | cut -d: -f1)
+
+        {
+          echo "list<<EOF"
+          printf '%s\n' "${list}"
+          echo "EOF"
+          echo "primary=${primary}"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: fetch, render & deploy task definitions
+      env:
+        REGISTRY: ${{ inputs.registry }}
+        REGION: ${{ inputs.region }}
+        REPO_NAME: ${{ inputs.repo-name }}
+        CLUSTER: ${{ inputs.cluster-name }}
+        IMAGE_TAG: ${{ github.sha }}
+        FAMILIES: ${{ steps.families.outputs.list }}
       run: |
-        repo="${{ inputs.registry }}.dkr.ecr.${{ inputs.region }}.amazonaws.com/${{ inputs.repo-name }}"
-        cat template.json | \
-        jq --arg repo "$repo" --arg sha "${{ github.sha }}" \
-          '.containerDefinitions |= map(if (.image | startswith($repo + ":")) then .image = $repo + ":" + $sha else . end)' | \
-        jq 'setpath(["family"]; "${{ inputs.task-family }}") | delpaths([["taskDefinitionArn"],["registeredAt"],["registeredBy"]])' \
-        > task-definition.json
-        cat task-definition.json
-        echo "task-definition=task-definition.json" >> "$GITHUB_OUTPUT"
+        set -euo pipefail
+        repo="${REGISTRY}.dkr.ecr.${REGION}.amazonaws.com/${REPO_NAME}"
 
-    - name: deploy to ECS cluster - ${{ inputs.cluster-name }}
-      uses: aws-actions/amazon-ecs-deploy-task-definition@v2
-      with:
-        task-definition: ${{ steps.render.outputs.task-definition }}
-        cluster: ${{ inputs.cluster-name }}
-        service: ${{ inputs.service-name }}
-        wait-for-service-stability: ${{ inputs.service-name != '' }}
+        while IFS= read -r entry; do
+          [ -n "$entry" ] || continue
+          family="${entry%%:*}"
+          if [ "$entry" = "$family" ]; then
+            service=""
+          else
+            service="${entry#*:}"
+          fi
+          echo "::group::deploy ${family}${service:+ (service: ${service})}"
+
+          # fetch current task definition template
+          aws ecs describe-task-definition --task-definition "${family}-template" \
+            --query taskDefinition > template.json
+
+          # render: point the matching container image at the new sha, set the
+          # family, and strip read-only fields that register-task-definition rejects
+          jq --arg repo "$repo" --arg sha "$IMAGE_TAG" \
+            '.containerDefinitions |= map(if (.image | startswith($repo + ":")) then .image = $repo + ":" + $sha else . end)' template.json \
+          | jq --arg family "$family" \
+            'setpath(["family"]; $family)
+             | delpaths([["taskDefinitionArn"],["registeredAt"],["registeredBy"],["status"],["revision"],["requiresAttributes"],["compatibilities"]])' \
+            > task-definition.json
+          cat task-definition.json
+
+          # register the new revision
+          task_arn=$(aws ecs register-task-definition \
+            --cli-input-json file://task-definition.json \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "registered ${task_arn}"
+
+          # deploy to the service and wait for stability, only when a service is given
+          if [ -n "$service" ]; then
+            aws ecs update-service --cluster "$CLUSTER" --service "$service" \
+              --task-definition "$task_arn" >/dev/null
+            echo "waiting for service ${service} to stabilize..."
+            aws ecs wait services-stable --cluster "$CLUSTER" --services "$service"
+          fi
+
+          echo "::endgroup::"
+        done <<< "$FAMILIES"
 
     - name: store updated image version in SSM
       if: ${{ inputs.put-version }}
       run: |
-        aws ssm put-parameter --name /${{ inputs.parameter-prefix != '' && inputs.parameter-prefix || inputs.task-family }}/image_tag --type String --value ${{ github.sha }} --overwrite
+        aws ssm put-parameter --name /${{ inputs.parameter-prefix != '' && inputs.parameter-prefix || steps.families.outputs.primary }}/image_tag --type String --value ${{ github.sha }} --overwrite
 
     # TODO: make this work with cross-account registries (role assumption!)
     - name: add deployment tag to image in ECR as a docker tag
