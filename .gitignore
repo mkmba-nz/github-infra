@@ -1,0 +1,2 @@
+# Agent state files (for all agents including manager)
+.agent-state.json
