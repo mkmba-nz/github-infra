@@ -55,12 +55,18 @@ name: Review Agent (shared)
 # consumers don't normally need a `with:` block beyond `mode` for requested
 # re-reviews.
 #
-# REQUIRED SECRETS (the consumer repo must define these, or inherit them):
+# REQUIRED VARIABLES (org-level, visibility=all — available to every repo):
 #
 #   TS_OAUTH_CLIENT_ID, TS_AUDIENCE
 #     Tailscale OIDC credentials used to reach the llmux Anthropic gateway.
-#   REVIEW_AGENT_APP_ID, REVIEW_AGENT_PRIVATE_KEY
-#     Credentials for the GitHub App that posts the review.
+#   REVIEW_AGENT_APP_ID
+#     Numeric ID of the GitHub App that posts the review.
+#
+# REQUIRED SECRETS (consumer repo must inherit; org secret is scoped to
+# selected repos, so the caller repo must be authorised for it):
+#
+#   REVIEW_AGENT_PRIVATE_KEY
+#     Private key for the GitHub App that posts the review.
 #
 # CONVENTIONS this workflow relies on:
 #
@@ -108,12 +114,6 @@ on:
         type: string
         default: ""
     secrets:
-      TS_OAUTH_CLIENT_ID:
-        required: true
-      TS_AUDIENCE:
-        required: true
-      REVIEW_AGENT_APP_ID:
-        required: true
       REVIEW_AGENT_PRIVATE_KEY:
         required: true
 
@@ -209,8 +209,8 @@ jobs:
         if: steps.decide.outputs.should_run == 'true'
         uses: tailscale/github-action@v4
         with:
-          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          audience: ${{ secrets.TS_AUDIENCE }}
+          oauth-client-id: ${{ vars.TS_OAUTH_CLIENT_ID }}
+          audience: ${{ vars.TS_AUDIENCE }}
           tags: tag:github
 
       - name: Generate GitHub App token
@@ -218,7 +218,7 @@ jobs:
         id: app-token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.REVIEW_AGENT_APP_ID }}
+          app-id: ${{ vars.REVIEW_AGENT_APP_ID }}
           private-key: ${{ secrets.REVIEW_AGENT_PRIVATE_KEY }}
 
       - name: Review Agent
