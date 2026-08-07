@@ -27,6 +27,7 @@ but if this is being reused outside the org, then you must supply as `vars`:
 | `TS_OAUTH_CLIENT_ID`         | Tailscale OAuth client - used to reach the llmux gateway |
 | `TS_AUDIENCE`                | Tailscale OIDC audience                                  |
 | `REVIEW_AGENT_APP_ID`        | GitHub App ID for the bot that posts the review          |
+| `MKMBA_ANTHROPIC_BASE_URL`   | URL of the claude proxy to use                           |
 
 ## Required secrets
 
@@ -55,10 +56,6 @@ otherwise enumerate.
 | Input                     | Required | Default                       | Description                                                                                  |
 |---------------------------|----------|-------------------------------|----------------------------------------------------------------------------------------------|
 | `mode`                    | no       | `auto`                        | `auto` or `requested` - see modes table above                                                |
-| `bot-id`                  | no       | `2798759`                     | Numeric GitHub App user ID. Defaults to the org-wide review App.                             |
-| `bot-name`                | no       | `mkmba-review-agent[bot]`     | App user login with `[bot]` suffix. Defaults to the org-wide review App.                     |
-| `claude-code-action-ref`  | no       | `v1.0.112`                    | Pinned ref of `anthropics/claude-code-action`                                                |
-| `anthropic-base-url`      | no       | `""` (action default)         | Override the Claude API base URL. Blank = whatever `claude-code-action` defaults to. Set to llmux URL to route through the gateway. |
 | `extra-instructions`      | no       | `""`                          | Repo-specific text appended to the end of the prompt                                         |
 
 ## Usage

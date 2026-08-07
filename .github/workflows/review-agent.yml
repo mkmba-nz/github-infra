@@ -51,16 +51,14 @@ name: Review Agent (shared)
 # the prompt, so an outsider could otherwise inject instructions into
 # the review bot.
 #
-# bot-id and bot-name default to the org-wide mkmba-review-agent App, so
-# consumers don't normally need a `with:` block beyond `mode` for requested
-# re-reviews.
-#
 # REQUIRED VARIABLES (org-level, visibility=all — available to every repo):
 #
 #   TS_OAUTH_CLIENT_ID, TS_AUDIENCE
 #     Tailscale OIDC credentials used to reach the llmux Anthropic gateway.
 #   REVIEW_AGENT_APP_ID
 #     Numeric ID of the GitHub App that posts the review.
+#   MKMBA_ANTHROPIC_BASE_URL
+#     Address of the proxy used to reach claude.
 #
 # REQUIRED SECRETS (consumer repo must inherit; org secret is scoped to
 # selected repos, so the caller repo must be authorised for it):
@@ -87,23 +85,6 @@ on:
         required: false
         type: string
         default: auto
-      bot-id:
-        description: Numeric GitHub App user ID of the review bot. Defaults to the org-wide mkmba-review-agent App.
-        required: false
-        type: string
-        default: "2798759"
-      bot-name:
-        description: GitHub App user login including the [bot] suffix. Defaults to the org-wide mkmba-review-agent App.
-        required: false
-        type: string
-        default: "mkmba-review-agent[bot]"
-      anthropic-base-url:
-        description: |
-          Base URL for the Claude API gateway. Leave blank to use the
-          anthropics/claude-code-action default (public Anthropic API).          
-        required: false
-        type: string
-        default: ""
       extra-instructions:
         description: |
           Repo-specific instructions appended verbatim to the end of the
@@ -150,15 +131,13 @@ jobs:
         id: decide
         env:
           GH_TOKEN: ${{ github.token }}
-          BOT_NAME: ${{ inputs.bot-name }}
+          # GraphQL author.login for Bot actors is the App slug without "[bot]"
+          BOT_SLUG: "mkmba-review-agent"
           MODE: ${{ inputs.mode }}
           DIFF_HASH: ${{ steps.diff.outputs.diff_hash }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_AUTHOR_TYPE: ${{ github.event.pull_request.user.type }}
         run: |
-          # GraphQL author.login for Bot actors is the App slug without "[bot]"
-          BOT_SLUG="${BOT_NAME%\[bot\]}"
-
           if [[ "$MODE" == "requested" ]]; then
             echo "should_run=true" >> $GITHUB_OUTPUT
             echo "is_rereview=true" >> $GITHUB_OUTPUT
@@ -225,13 +204,13 @@ jobs:
         if: steps.decide.outputs.should_run == 'true'
         uses: anthropics/claude-code-action@v1.0.112
         env:
-          ANTHROPIC_BASE_URL: ${{ inputs.anthropic-base-url }}
+          ANTHROPIC_BASE_URL: ${{ vars.MKMBA_ANTHROPIC_BASE_URL }}
           ANTHROPIC_AUTH_TOKEN: "${{ github.job }}-${{ github.repository }}"
         with:
           anthropic_api_key: x   # Uses env config above
           github_token: ${{ steps.app-token.outputs.token }}
           bot_id: ${{ inputs.bot-id }}
-          bot_name: ${{ inputs.bot-name }}
+          bot_name: "mkmba-review-agent[bot]"
           allowed_bots: "*"      # Allow other agents (GitHub Apps) to trigger this
 
           # Enable progress tracking
