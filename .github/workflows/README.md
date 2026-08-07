@@ -17,6 +17,17 @@ Both modes share the same concurrency group (`pr-review-<number>`) with
 - a rapid second @-mention cancels the first re-review (the latest
   reviewer instructions win).
 
+## Required variables
+
+These are provisioned as org vars in mkmba-nz, so no action is required when used within that org, 
+but if this is being reused outside the org, then you must supply as `vars`:
+
+| Variable                     | Purpose                                                  |
+|------------------------------|----------------------------------------------------------|
+| `TS_OAUTH_CLIENT_ID`         | Tailscale OAuth client - used to reach the llmux gateway |
+| `TS_AUDIENCE`                | Tailscale OIDC audience                                  |
+| `REVIEW_AGENT_APP_ID`        | GitHub App ID for the bot that posts the review          |
+
 ## Required secrets
 
 Pass via `secrets: inherit` if the names match in the consumer repo,
@@ -24,10 +35,7 @@ otherwise enumerate.
 
 | Secret                       | Purpose                                                  |
 |------------------------------|----------------------------------------------------------|
-| `TS_OAUTH_CLIENT_ID`         | Tailscale OAuth client - used to reach the llmux gateway |
-| `TS_AUDIENCE`                | Tailscale OIDC audience                                  |
-| `REVIEW_AGENT_APP_ID`        | GitHub App ID for the bot that posts the review          |
-| `REVIEW_AGENT_PRIVATE_KEY`   | GitHub App private key for the same App                  |
+| `REVIEW_AGENT_PRIVATE_KEY`   | GitHub App private key matching REVIEW_AGENT_APP_ID      |
 
 ## Conventions
 
