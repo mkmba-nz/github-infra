@@ -35,6 +35,11 @@ on:
         required: false
         type: string
         default: linux/amd64
+      runs-on:
+        required: false
+        type: string
+        default: ubuntu-latest
+        description: "Runner label for the build job. Set to ubuntu-24.04-arm to build linux/arm64 natively rather than under QEMU emulation."
       cache-mounts:
         required: false
         type: string
@@ -49,7 +54,7 @@ on:
 
 jobs:
   build-and-push:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
     steps:
       - uses: actions/checkout@v4
       - uses: aws-actions/configure-aws-credentials@v4
@@ -87,9 +92,13 @@ jobs:
           # github.sha rolls the key every run so the restored cache is always re-saved
           # with new entries (actions/cache never updates an existing key); restore-keys
           # falls back to the most recent prior cache for this image.
-          key: ${{ runner.os }}-cache-mounts-${{ inputs.repo-name }}-${{ github.sha }}
+          # runner.arch keeps X64 and ARM64 caches apart - runner.os is `Linux` for both,
+          # and these are raw directory tarballs with no internal arch tagging, so an
+          # amd64 cache restored into an arm64 build can yield unusable artefacts (e.g.
+          # compiled native gem extensions).
+          key: ${{ runner.os }}-${{ runner.arch }}-cache-mounts-${{ inputs.repo-name }}-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-cache-mounts-${{ inputs.repo-name }}-
+            ${{ runner.os }}-${{ runner.arch }}-cache-mounts-${{ inputs.repo-name }}-
 
       - name: Inject cache mounts into BuildKit
         if: ${{ inputs.cache-mounts != '' }}
