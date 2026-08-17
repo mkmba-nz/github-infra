@@ -71,8 +71,8 @@ name: Review Agent (shared)
 #   - All other review-agent bots in the org have logins ending in "-agent"
 #     (so the human-reviewer detection can exclude them with a single test).
 #   - The review bot's GraphQL author.login is the App slug without "[bot]"
-#     (GraphQL renders Bot actor logins this way) - we derive the slug from
-#     the [bot]-suffixed name passed in `bot-name`.
+#     (GraphQL renders Bot actor logins this way) - so matching is done
+#     against the bare slug in BOT_SLUG.
 
 on:
   workflow_call:
@@ -166,8 +166,16 @@ jobs:
           fi
 
           # mode=auto: dedupe by diff hash against prior bot comments.
-          BOT_COMMENTS=$(gh pr view "$PR_NUMBER" --json comments \
-            --jq --arg bot "$BOT_SLUG" '.comments[] | select(.author.login == $bot) | .body' || true)
+          # gh's --jq takes a filter string only - it is not jq and rejects jq
+          # flags like --arg - so the filter reads BOT_SLUG from the environment.
+          # Keep the fetch out of a pipeline: the default shell is `bash -e`
+          # without pipefail, so `gh ... | jq ...` would swallow a gh failure and
+          # silently degrade into "no prior reviews" - the defect fixed here.
+          if ! BOT_COMMENTS=$(gh pr view "$PR_NUMBER" --json comments \
+              --jq '.comments[] | select(.author.login == env.BOT_SLUG) | .body'); then
+            echo "::error::Could not fetch comments for PR #$PR_NUMBER - unable to tell whether diff-hash:$DIFF_HASH has already been reviewed"
+            exit 1
+          fi
           EXACT_MATCH=$(echo "$BOT_COMMENTS" | grep "diff-hash:$DIFF_HASH" | tail -1 || true)
           PREVIOUS_HASH=$(echo "$BOT_COMMENTS" | grep -oP 'diff-hash:\K[a-f0-9]{64}' | tail -1 || true)
 

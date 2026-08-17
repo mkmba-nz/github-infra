@@ -40,10 +40,11 @@ otherwise enumerate.
 
 ## Conventions
 
-- **Bot login.** `bot-name` takes the `[bot]`-suffixed user login
-  (e.g. `mkmba-review-agent[bot]`). The workflow strips the suffix when
-  matching against GraphQL `author.login` values, which omit `[bot]` for
-  App actors.
+- **Bot login.** The review bot is the org-wide `mkmba-review-agent` App,
+  hardcoded in the workflow. GraphQL `author.login` omits the `[bot]`
+  suffix for App actors, so the workflow matches reviews and comments
+  against the bare slug (`BOT_SLUG`) and passes the `[bot]`-suffixed login
+  to the review action as `bot_name`.
 - **Human vs agent.** The "is this a human reviewer?" check (auto mode
   only) excludes any reviewer whose login ends in `-agent`. Org-wide
   convention: every automated review-posting bot's slug ends in `-agent`.
@@ -134,11 +135,18 @@ The text is appended verbatim to the end of the prompt. Combine with
 3. **A prior review exists with a different diff hash** → re-review, but
    in "focus on what's changed since the previous review" mode.
 4. **No prior review** → first-pass review.
+5. **The comment fetch itself fails** (e.g. a GitHub API blip) → the job
+   fails with an `::error::` annotation, and no review is posted.
 
 Every review summary comment ends with a `diff-hash:<sha256>` marker that
 the dedupe logic reads on subsequent runs. Requested-mode re-reviews also
 emit this marker, so a subsequent auto-mode run on the same diff will
 correctly skip.
+
+Case 5 is deliberately fail-closed: if we cannot read the prior comments we
+cannot tell case 2 from case 4, and treating that as "no prior review" is
+what silently disabled the dedupe entirely for the workflow's first year.
+Re-run the job to recover from a transient failure.
 
 In `requested` mode none of the above applies — the workflow always
 proceeds to the review step.
