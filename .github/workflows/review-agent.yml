@@ -217,7 +217,7 @@ jobs:
         with:
           anthropic_api_key: x   # Uses env config above
           github_token: ${{ steps.app-token.outputs.token }}
-          bot_id: ${{ inputs.bot-id }}
+          bot_id: ${{ vars.REVIEW_AGENT_APP_ID }}
           bot_name: "mkmba-review-agent[bot]"
           allowed_bots: "*"      # Allow other agents (GitHub Apps) to trigger this
 
