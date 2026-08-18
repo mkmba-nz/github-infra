@@ -231,50 +231,84 @@ jobs:
             ${{ inputs.mode == 'requested' && 'REVIEWER SPECIAL INSTRUCTIONS (from the comment that triggered this re-review, may override default instructions):' || '' }}
             ${{ inputs.mode == 'requested' && github.event.comment.body || '' }}
 
-            Perform a comprehensive code review with the following focus areas:
+            ## Analysis scope
 
-            1. **Code Quality**
-               - Clean code principles and best practices
-               - Proper error handling and edge cases
-               - Code readability and maintainability
+            Perform a comprehensive review. Examine the change, and the code
+            around it, for problems in the areas below. This list is a checklist
+            for YOUR analysis - it is NOT a template for your output. Do NOT
+            structure your report around it, and do NOT mention an area you have
+            nothing to report on.
 
-            2. **Security**
-               - Check for potential security vulnerabilities
-               - Validate input sanitization
-               - Review authentication/authorization logic
+            1. **Code quality** - clean code principles, error handling and edge
+               cases, readability and maintainability.
+            2. **Security** - vulnerabilities, input sanitisation,
+               authentication and authorisation logic.
+            3. **Performance** - bottlenecks, inefficient queries, memory and
+               resource leaks.
+            4. **Testing** - coverage of the change, test quality, missing
+               scenarios and edge cases.
+            5. **Documentation** - code comments where warranted, README updates
+               for new features, API documentation accuracy.
 
-            3. **Performance**
-               - Identify potential performance bottlenecks
-               - Review database queries for efficiency
-               - Check for memory leaks or resource issues
+            ## Output contract: report each finding EXACTLY ONCE
 
-            4. **Testing**
-               - Verify adequate test coverage
-               - Review test quality and edge cases
-               - Check for missing test scenarios
+            You have two output channels, and every finding belongs to exactly
+            one of them. Repeating the same finding in more than one place makes
+            the review harder to read and is the failure mode this contract
+            exists to prevent.
 
-            5. **Documentation**
-               - Ensure code is properly documented
-               - Verify README updates for new features
-               - Check API documentation accuracy
-
-            Provide detailed feedback using inline comments for specific issues:
-               - Only comment when the issue requires changes, or is particularly severe. Don't use inline comments for general feedback or compliments.
-            ${{ steps.decide.outputs.is_rereview == 'true' && '  - Do not repeat comments from previous reviews. Comment only on issues related to new or modified code since the last review.' || '' }}
+            **Channel 1 - inline comments**, for a specific problem at a specific
+            line. Raise every such problem this way, on the line it affects:
+              - Only comment when the issue requires a change, or is particularly
+                severe. Do NOT use inline comments for general feedback or
+                compliments.
+            ${{ steps.decide.outputs.is_rereview == 'true' && '  - Do NOT repeat comments from previous reviews. Comment only on issues related to new or modified code since the last review.' || '' }}
             ${{ steps.decide.outputs.is_rereview == 'true' && '  - Mark inline comments from previous reviews that are now addressed as resolved.' || '' }}
+
+            **Channel 2 - the summary comment**. Your final output is published
+            for you as a tracking comment on the PR - that comment IS your
+            summary, so do NOT create a second one with `gh pr comment`. It is
+            the ONLY place for findings that are not inline comments. Keep to
+            this shape:
+              - One verdict line: approved, or changes requested, with a brief
+                clause saying why.
+              - Then bulleted points, a sentence or two each, covering only
+                findings you did not raise inline. None at all is the correct
+                answer when there is nothing more to say.
+              - You MUST NOT restate in a bullet a finding you already raised as
+                an inline comment. A pointer or a count is the most you may add
+                (for example "3 inline comments"). The verdict line may name the
+                reason in passing.
+              - No compliments or praise, no description of what the PR does, no
+                area-by-area narration, no account of how you conducted the
+                review.
+              - Last of all, the diff-hash marker given at the end of these
+                instructions.
+            ${{ steps.decide.outputs.is_rereview == 'true' && '  - Where there were earlier reviews, cover only what has changed since them, and do NOT restate their findings or approving commentary - readers have already seen those. Still give your verdict line.' || '' }}
+
+            Reviewer special instructions, where present, take precedence over
+            this shape.
+
+            ## Submitting the review
 
             YOU HAVE PERMISSION AND CAPABILITY to submit GitHub PR reviews using the `gh pr review` command.
             You MUST submit a review when your analysis is complete.
 
-            Submit a gh review with status set to reflect your overall verdict:
-              - Blocking issues present -> `gh pr review --request-changes`
-              - No blocking issues -> `gh pr review --approve`
-              - No body is required (general review comments should be placed in your tracking comment).
+            Submit a gh review with status set to reflect your overall verdict.
+            The body is asymmetric - do NOT put your findings in it either way:
+              - No blocking issues -> `gh pr review --approve` with NO body at
+                all. Do NOT pass -b.
+              - Blocking issues present -> `gh pr review --request-changes -b "<one line>"`.
+                That one line states the verdict and says the detail is in the
+                review summary comment. It is required only because GitHub
+                rejects a request-changes review with an empty body.
 
             IMPORTANT: Failure to set a review status will stall the entire PR workflow in this repository!
             Do NOT claim you cannot submit reviews - you have the tool permission and GitHub token to do so.
 
-            IMPORTANT: Include this exact marker at the END of your summary comment (after the review):
+            IMPORTANT: The dedupe logic reads the marker below from PR comments
+            only, never from review bodies, so it must go in your summary
+            comment. Append it verbatim as the LAST line of that comment:
             diff-hash:${{ steps.diff.outputs.diff_hash }}
 
             ${{ inputs.extra-instructions }}
