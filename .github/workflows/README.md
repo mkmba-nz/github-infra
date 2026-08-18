@@ -125,6 +125,30 @@ is at least a collaborator) but it doesn't hurt to include.
 The text is appended verbatim to the end of the prompt. Combine with
 `mode: requested` if needed.
 
+## Review output
+
+The prompt holds the agent to a one-report contract, so the same finding is
+never published twice:
+
+- **Findings appear exactly once.** A line-specific problem that needs
+  changing goes in an inline comment; everything else goes in the summary
+  comment. The summary must not restate anything already raised inline — at
+  most it points at those comments or gives a count.
+- **The summary comment is a verdict line plus at most five bullets.** No
+  compliments, no description of the PR, no area-by-area narration. On a
+  re-review it covers only what changed since the previous review, and does
+  not restate earlier findings or approvals.
+- **The review body is empty on approve, one line on request-changes.**
+  `gh pr review --approve` is submitted with no body; `--request-changes`
+  carries a single line naming the verdict and deferring to the summary
+  comment, because GitHub rejects a request-changes review with an empty
+  body.
+
+The summary comment is the tracking comment that `track_progress: true`
+publishes on the agent's behalf — the agent is told not to post a second one
+of its own, and to end that comment with the `diff-hash` marker described
+under [Skip / dedupe behaviour](#skip--dedupe-behaviour-auto-mode-only).
+
 ## Skip / dedupe behaviour (auto mode only)
 
 1. **PR opened by a bot AND already approved by us AND a human has
