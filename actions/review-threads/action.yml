@@ -1,0 +1,113 @@
+name: Review Threads
+description: |
+  Publishes two narrow commands - list-review-threads and resolve-thread - for
+  an LLM step reviewing a pull request, so the model can work with that PR's
+  review threads without being granted general GitHub API access. See the
+  README for how the commands behave and why they are shaped this way.
+
+  Usage:
+    steps:
+      - uses: mkmba-nz/github-infra/actions/review-threads@main
+        id: review-threads
+        with:
+          repository: ${{ github.repository }}
+          pull-request-number: ${{ github.event.pull_request.number }}
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_args: >
+            --allowedTools "Bash(gh pr review:*),${{ steps.review-threads.outputs.allowed_tools }}"
+
+inputs:
+  repository:
+    description: "OWNER/REPO of the repository holding the pull request under review."
+    required: true
+  pull-request-number:
+    description: |
+      Number of the pull request under review. Not a standard runner variable -
+      it comes from the event payload (github.event.pull_request.number).
+    required: true
+
+outputs:
+  commands_path:
+    description: |
+      Absolute path of the directory holding list-review-threads and
+      resolve-thread. The invocation the prompt asks the model for must be
+      written out from this value - see the README.
+    value: ${{ steps.publish.outputs.commands_path }}
+  allowed_tools:
+    description: |
+      Ready-made --allowedTools entries for the two commands, so the allowlist
+      rule cannot disagree with the path this action published. Comma-join it
+      with any other entries the caller needs - it replaces none of them.
+    value: ${{ steps.publish.outputs.allowed_tools }}
+
+runs:
+  using: composite
+  steps:
+    - name: Publish review-thread commands
+      id: publish
+      shell: bash
+      env:
+        REPOSITORY_INPUT: ${{ inputs.repository }}
+        PR_NUMBER_INPUT: ${{ inputs.pull-request-number }}
+      run: |
+        set -euo pipefail
+
+        # Checked here so a mis-wired workflow fails the job at once. The two
+        # commands check again at use time rather than trusting this step: they
+        # run in the model's shell, which is also reachable when this action was
+        # skipped, and their check is what stops them acting on another PR.
+        if [[ ! "$REPOSITORY_INPUT" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+          echo "::error::repository must be OWNER/REPO (got '${REPOSITORY_INPUT}')"
+          exit 1
+        fi
+        if [[ ! "$PR_NUMBER_INPUT" =~ ^[0-9]+$ ]]; then
+          echo "::error::pull-request-number must be a number (got '${PR_NUMBER_INPUT}')"
+          exit 1
+        fi
+
+        # An empty or wrong path is the worst failure available here: every
+        # allowlist rule built from it would match nothing, and an unmatched
+        # command is denied silently, so the run would look healthy while
+        # resolving nothing. Fail the job instead.
+        if [ -z "${GITHUB_ACTION_PATH:-}" ]; then
+          echo "::error::GITHUB_ACTION_PATH is unset - cannot publish the review-thread commands"
+          exit 1
+        fi
+        COMMANDS_PATH="${GITHUB_ACTION_PATH}/bin"
+        for command in list-review-threads resolve-thread; do
+          if [ ! -x "${COMMANDS_PATH}/${command}" ]; then
+            echo "::error::${COMMANDS_PATH}/${command} is missing or not executable"
+            exit 1
+          fi
+        done
+
+        # A review job checks out the pull request head, so anything inside the
+        # workspace is author-controlled - serving the commands from there would
+        # run the PR author's code with the reviewing App's token. A relative
+        # `uses: ./actions/review-threads` puts $GITHUB_ACTION_PATH exactly
+        # there, which is why this is checked rather than assumed.
+        if [ -n "${GITHUB_WORKSPACE:-}" ] && [[ "$COMMANDS_PATH" == "$GITHUB_WORKSPACE"/* ]]; then
+          echo "::error::${COMMANDS_PATH} is inside the workspace (${GITHUB_WORKSPACE}) - reference this action by owner/repo@ref, not by a relative path"
+          exit 1
+        fi
+
+        # The allowlist rule and the model's invocation have to share a
+        # byte-identical prefix, and a mismatch is denied silently rather than
+        # reported - so the rules are emitted from the same value as the path
+        # instead of being spelled out again by the caller.
+        {
+          echo "commands_path=${COMMANDS_PATH}"
+          echo "allowed_tools=Bash(${COMMANDS_PATH}/list-review-threads:*),Bash(${COMMANDS_PATH}/resolve-thread:*)"
+        } >> "$GITHUB_OUTPUT"
+
+        # The commands run inside the model's step, not inside this action, so
+        # nothing local to $GITHUB_ACTION_PATH reaches them - the repository and
+        # pull request have to cross the step boundary through the job
+        # environment.
+        {
+          echo "REVIEW_THREADS_REPOSITORY=${REPOSITORY_INPUT}"
+          echo "REVIEW_THREADS_PR_NUMBER=${PR_NUMBER_INPUT}"
+        } >> "$GITHUB_ENV"
+
+        echo "::notice::Review-thread commands published at ${COMMANDS_PATH} for ${REPOSITORY_INPUT}#${PR_NUMBER_INPUT}"

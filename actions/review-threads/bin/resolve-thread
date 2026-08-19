@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+# Resolves a review thread on the pull request under review, recording why.
+#
+# Usage: resolve-thread <THREAD_ID> <REASON>
+#
+# THREAD_ID is the `thread-id` field from list-review-threads output (a
+# `PRRT_...` node ID). REASON is required, is posted as a reply before the
+# thread is resolved, and should be quoted - an unquoted reason is joined back
+# up rather than truncated to its first word.
+#
+# The repository and pull request come from REVIEW_THREADS_REPOSITORY and
+# REVIEW_THREADS_PR_NUMBER, published by the review-threads composite action,
+# never from an argument, and the thread is checked to belong to them before
+# anything is mutated. The README explains why each of those is so.
+#
+# Thread resolution is only available via GraphQL (no REST equivalent).
+set -euo pipefail
+
+THREAD_ID="${1:-}"
+REASON="${*:2}"
+
+if [ $# -lt 2 ] || [[ ! "$REASON" =~ [^[:space:]] ]]; then
+  echo 'Usage: resolve-thread <THREAD_ID> "<REASON>"' >&2
+  echo "REASON is required: resolving a thread must say why it is being resolved." >&2
+  echo 'Quote it, e.g.: resolve-thread PRRT_kwDOAB12 "Fixed in abc123 - the helper now handles the empty case"' >&2
+  exit 1
+fi
+
+# THREAD_ID is the one value a model supplies, so it is constrained to the shape
+# GitHub issues for a review thread before it reaches an API call.
+if [[ ! "$THREAD_ID" =~ ^PRRT_[A-Za-z0-9_=-]+$ ]]; then
+  echo "Error: '${THREAD_ID}' is not a review thread ID - use the PRRT_... value from the thread-id field of list-review-threads" >&2
+  exit 1
+fi
+
+REPOSITORY="${REVIEW_THREADS_REPOSITORY:-}"
+PR_NUMBER="${REVIEW_THREADS_PR_NUMBER:-}"
+
+if [[ ! "$REPOSITORY" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+  echo "Error: REVIEW_THREADS_REPOSITORY must be OWNER/REPO (got '${REPOSITORY}')" >&2
+  exit 1
+fi
+if [[ ! "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+  echo "Error: REVIEW_THREADS_PR_NUMBER must be a pull request number (got '${PR_NUMBER}')" >&2
+  exit 1
+fi
+
+# -f, not -F: -F applies gh's magic typing, which would read a leading "@" in
+# the model-supplied thread ID as a local filename and send that file's contents
+# to GitHub. GraphQL's ID! accepts a string either way.
+if ! THREAD=$(gh api graphql -f threadId="$THREAD_ID" -f query='
+  query($threadId: ID!) {
+    node(id: $threadId) {
+      ... on PullRequestReviewThread {
+        isResolved
+        repository { nameWithOwner }
+        pullRequest { number }
+        comments(first: 1) { nodes { databaseId } }
+      }
+    }
+  }
+' -q '.data.node'); then
+  echo "Error: could not look up thread ${THREAD_ID}" >&2
+  exit 1
+fi
+
+# One field per line rather than a single tab-separated one: an unresolved
+# thread's `false` and a missing field both render empty-ish, and tab is IFS
+# whitespace, so a tab-split would silently shift every field left.
+mapfile -t FIELDS < <(jq -r '
+  (.isResolved | tostring),
+  (.repository.nameWithOwner // ""),
+  (.pullRequest.number // "" | tostring),
+  (.comments.nodes[0].databaseId // "" | tostring)' <<<"$THREAD")
+
+if [ "${#FIELDS[@]}" -ne 4 ]; then
+  echo "Error: could not read GitHub's answer for thread ${THREAD_ID} - nothing changed" >&2
+  exit 1
+fi
+
+IS_RESOLVED="${FIELDS[0]}"
+THREAD_REPO="${FIELDS[1]}"
+THREAD_PR="${FIELDS[2]}"
+COMMENT_DB_ID="${FIELDS[3]}"
+
+if [ -z "$THREAD_REPO" ] || [ -z "$THREAD_PR" ] || [ -z "$COMMENT_DB_ID" ]; then
+  echo "Error: ${THREAD_ID} is not a review thread with comments on a pull request" >&2
+  exit 1
+fi
+
+# Numeric comparison: both sides are digits, but "007" and "7" are the same pull
+# request and would not be the same string.
+if [ "${THREAD_REPO,,}" != "${REPOSITORY,,}" ] || [ "$THREAD_PR" -ne "$PR_NUMBER" ]; then
+  echo "Error: thread ${THREAD_ID} is on ${THREAD_REPO}#${THREAD_PR}, but the pull request under review is ${REPOSITORY}#${PR_NUMBER} - nothing changed" >&2
+  exit 1
+fi
+
+if [ "$IS_RESOLVED" = "true" ]; then
+  echo "Thread ${THREAD_ID} is already resolved - no reply posted, nothing changed."
+  exit 0
+fi
+
+# There is no reliable pre-flight check for "may I resolve this": GitHub reports
+# viewerCanResolve as false on every thread when the caller is an App
+# installation token, including threads that same token then resolves
+# successfully. Attempting the mutation is the only honest test.
+
+# REST, not the GraphQL addPullRequestReviewComment mutation: that mutation adds
+# the comment to a pending review, where it stays invisible until the review is
+# submitted, and the reason has to be on the thread before it is resolved.
+#
+# -f again here: a reason beginning with "@" is ordinary prose and must be sent
+# verbatim, not read as a filename.
+if ! gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}/comments/${COMMENT_DB_ID}/replies" \
+    -f body="$REASON" >/dev/null; then
+  echo "Error: could not post the reason on thread ${THREAD_ID} - leaving it unresolved" >&2
+  exit 1
+fi
+
+if ! RESOLVED=$(gh api graphql -f threadId="$THREAD_ID" -f query='
+  mutation($threadId: ID!) {
+    resolveReviewThread(input: {threadId: $threadId}) {
+      thread { isResolved }
+    }
+  }
+' -q '.data.resolveReviewThread.thread.isResolved'); then
+  echo "Error: reason posted on thread ${THREAD_ID}, but resolving it failed - the thread is still open" >&2
+  exit 1
+fi
+
+if [ "$RESOLVED" != "true" ]; then
+  echo "Error: reason posted on thread ${THREAD_ID}, but GitHub did not report it as resolved" >&2
+  exit 1
+fi
+
+echo "Resolved thread ${THREAD_ID} on ${REPOSITORY}#${PR_NUMBER}, having replied: ${REASON}"
