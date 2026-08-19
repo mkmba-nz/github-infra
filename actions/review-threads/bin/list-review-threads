@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+# Lists the review threads on the pull request under review.
+#
+# Usage: list-review-threads
+#
+# Takes no arguments. The repository and pull request are read from
+# REVIEW_THREADS_REPOSITORY and REVIEW_THREADS_PR_NUMBER, published by the
+# review-threads composite action - never from an argument, so the caller
+# cannot point this at another pull request.
+#
+# Output is plain text, readable as printed rather than through a pipeline -
+# see the README for why. Threads are paginated in full; comments are capped per
+# thread, and a capped thread says so rather than dropping comments silently.
+# The cap keeps the most recent comments: the newest are the ones that say
+# whether a finding has been addressed.
+set -euo pipefail
+
+if [ $# -gt 0 ]; then
+  echo "Usage: list-review-threads" >&2
+  echo "Takes no arguments: the repository and pull request are read from the environment." >&2
+  exit 1
+fi
+
+REPOSITORY="${REVIEW_THREADS_REPOSITORY:-}"
+PR_NUMBER="${REVIEW_THREADS_PR_NUMBER:-}"
+
+if [[ ! "$REPOSITORY" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+  echo "Error: REVIEW_THREADS_REPOSITORY must be OWNER/REPO (got '${REPOSITORY}')" >&2
+  exit 1
+fi
+if [[ ! "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+  echo "Error: REVIEW_THREADS_PR_NUMBER must be a pull request number (got '${PR_NUMBER}')" >&2
+  exit 1
+fi
+
+COMMENT_LIMIT=100
+
+QUERY='
+  query($owner: String!, $repo: String!, $number: Int!, $comments: Int!, $after: String) {
+    repository(owner: $owner, name: $repo) {
+      pullRequest(number: $number) {
+        reviewThreads(first: 100, after: $after) {
+          pageInfo { hasNextPage endCursor }
+          nodes {
+            id
+            isResolved
+            isOutdated
+            path
+            line
+            originalLine
+            comments(last: $comments) {
+              totalCount
+              pageInfo { hasPreviousPage }
+              nodes {
+                author { login }
+                createdAt
+                body
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+'
+
+RENDER='
+  .nodes
+  | to_entries[]
+  | (.key + 1 + $base) as $n
+  | .value as $t
+  | "--- thread \($n)",
+    "thread-id: \($t.id)",
+    "resolved: \(if $t.isResolved then "yes" else "no" end)",
+    "outdated: \(if $t.isOutdated then "yes" else "no" end)",
+    (
+      # An outdated thread has no current line, only the one it was written
+      # against - say which of the two is being reported.
+      if $t.line != null then "location: \($t.path):\($t.line)"
+      elif $t.originalLine != null then "location: \($t.path):\($t.originalLine) (line as originally commented on)"
+      else "location: \($t.path // "(no file)")"
+      end
+    ),
+    # The cap keeps the newest comments, so the ones shown are the tail of the
+    # thread - number them from their real position, not from 1.
+    (($t.comments.totalCount - ($t.comments.nodes | length)) as $dropped
+     | $t.comments.nodes
+     | to_entries[]
+     | "comment \(.key + 1 + $dropped) by \(.value.author.login // "(unknown author)") at \(.value.createdAt):",
+       (.value.body
+        | gsub("\r"; "")
+        | sub("\n+$"; "")
+        | if . == "" then "    (empty comment)"
+          else split("\n")[] | "    \(.)"
+          end)),
+    (if $t.comments.pageInfo.hasPreviousPage
+     then "TRUNCATED: this thread has \($t.comments.totalCount) comments; only the \($limit) most recent are shown above, and its \($t.comments.totalCount - $limit) earlier ones are not"
+     else empty end),
+    ""
+'
+
+echo "Review threads on ${REPOSITORY}#${PR_NUMBER}"
+echo
+
+CURSOR=""
+TOTAL=0
+UNRESOLVED=0
+
+while :; do
+  # -f for the strings, -F only for the two Int! variables: -F magic-types its
+  # value, so an all-digit owner or repository name would be sent as a number
+  # and rejected against String!.
+  ARGS=(-f owner="${REPOSITORY%%/*}" -f repo="${REPOSITORY##*/}" -F number="$PR_NUMBER" -F comments="$COMMENT_LIMIT")
+  if [ -n "$CURSOR" ]; then
+    ARGS+=(-f after="$CURSOR")
+  fi
+
+  if ! THREADS=$(gh api graphql "${ARGS[@]}" -f query="$QUERY" \
+      -q '.data.repository.pullRequest.reviewThreads // empty'); then
+    echo "Error: could not fetch review threads for ${REPOSITORY}#${PR_NUMBER}" >&2
+    exit 1
+  fi
+
+  if [ -z "$THREADS" ]; then
+    if [ "$TOTAL" -eq 0 ]; then
+      echo "Error: no pull request ${REPOSITORY}#${PR_NUMBER} readable with this token" >&2
+    else
+      echo "Error: ${REPOSITORY}#${PR_NUMBER} stopped being readable part-way through - the listing above is incomplete" >&2
+    fi
+    exit 1
+  fi
+
+  if ! jq -r --argjson base "$TOTAL" --argjson limit "$COMMENT_LIMIT" "$RENDER" <<<"$THREADS"; then
+    echo "Error: could not read GitHub's answer for ${REPOSITORY}#${PR_NUMBER} - the listing above is incomplete" >&2
+    exit 1
+  fi
+
+  # One field per line: a tab-split would treat an empty end cursor as no field
+  # at all and shift the rest left.
+  mapfile -t PAGE_INFO < <(jq -r '
+    (.nodes | length),
+    ([.nodes[] | select(.isResolved | not)] | length),
+    (.pageInfo.hasNextPage | tostring),
+    (.pageInfo.endCursor // "")' <<<"$THREADS")
+
+  if [ "${#PAGE_INFO[@]}" -ne 4 ]; then
+    echo "Error: could not read GitHub's answer for ${REPOSITORY}#${PR_NUMBER} - the listing above is incomplete" >&2
+    exit 1
+  fi
+
+  TOTAL=$((TOTAL + ${PAGE_INFO[0]}))
+  UNRESOLVED=$((UNRESOLVED + ${PAGE_INFO[1]}))
+
+  [ "${PAGE_INFO[2]}" = "true" ] || break
+
+  CURSOR="${PAGE_INFO[3]}"
+  if [ -z "$CURSOR" ]; then
+    # Stopping here would drop the remaining threads silently, which is the one
+    # outcome this command must never produce.
+    echo "Error: more threads remain on ${REPOSITORY}#${PR_NUMBER} but GitHub returned no cursor to fetch them - the listing above is incomplete" >&2
+    exit 1
+  fi
+done
+
+if [ "$TOTAL" -eq 0 ]; then
+  echo "No review threads on this pull request."
+else
+  echo "Every thread on this pull request is listed above: ${TOTAL} in total, ${UNRESOLVED} unresolved, $((TOTAL - UNRESOLVED)) resolved."
+fi
