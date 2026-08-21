@@ -1,21 +1,16 @@
 name: Review Threads
+
+# A `${{ }}` inside a description is still parsed, and a description accepts
+# neither `github.` nor `steps.` - one there makes the whole manifest invalid,
+# failing every job that references this action while the runner is preparing
+# actions: before any step runs, whatever that step's `if:` says, and in every
+# consumer at once. That is why the usage example lives in the README instead;
+# expressions belong in `runs:` and in the `outputs` values below.
 description: |
   Publishes two narrow commands - list-review-threads and resolve-thread - for
   an LLM step reviewing a pull request, so the model can work with that PR's
   review threads without being granted general GitHub API access. See the
-  README for how the commands behave and why they are shaped this way.
-
-  Usage:
-    steps:
-      - uses: mkmba-nz/github-infra/actions/review-threads@main
-        id: review-threads
-        with:
-          repository: ${{ github.repository }}
-          pull-request-number: ${{ github.event.pull_request.number }}
-      - uses: anthropics/claude-code-action@v1
-        with:
-          claude_args: >
-            --allowedTools "Bash(gh pr review:*),${{ steps.review-threads.outputs.allowed_tools }}"
+  README for usage, how the commands behave, and why they are shaped this way.
 
 inputs:
   repository:
