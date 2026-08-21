@@ -149,6 +149,37 @@ publishes on the agent's behalf — the agent is told not to post a second one
 of its own, and to end that comment with the `diff-hash` marker described
 under [Skip / dedupe behaviour](#skip--dedupe-behaviour-auto-mode-only).
 
+## Resolving review threads
+
+The workflow runs [`actions/review-threads`](../../actions/review-threads),
+which publishes two narrow commands the agent can use to list the review
+threads on the PR it is reviewing and to resolve one of them. The agent is
+asked to close only its own earlier findings that it now judges addressed or
+no longer applicable, stating the reason — which the command posts as a reply
+on the thread before resolving it, so a closure is always attributable. Those
+rules are given to the agent on every review, not only on a re-review, so
+whichever route triggers a review the guardrails come with it. This is a
+capability consumers get automatically; there is no input to opt in or out.
+
+Three consequences worth knowing:
+
+- **The agent can resolve any thread on the PR, including a human's.**
+  GitHub scopes thread resolution by write access, not by authorship, so the
+  "only your own findings" rule is prompt guidance rather than a hard limit.
+  Where a repo enables *Require conversation resolution before merging*, a
+  wrongly closed thread unblocks a merge — the mandatory reason reply is what
+  makes that visible and reversible.
+- **The step is fail-closed.** If the action cannot publish a usable command
+  path it fails the job and no review is posted, because the alternative is a
+  run that looks healthy while every command is silently denied.
+- **Reply-then-resolve is not atomic.** The concurrency group cancels a running
+  review when a newer one starts, so a cancelled run can leave a reason reply
+  on a thread that is still open, and the retry posts a second one. A duplicate
+  reply is the accepted cost of never resolving a thread silently.
+
+The commands themselves are documented in the action's
+[README](../../actions/review-threads/README.md).
+
 ## Skip / dedupe behaviour (auto mode only)
 
 1. **PR opened by a bot AND already approved by us AND a human has
