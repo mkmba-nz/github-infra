@@ -15,5 +15,5 @@ permissions:
 
 jobs:
   review:
-    uses: ./review-agent.yml
+    uses: ./github/workflows/review-agent.yml
     secrets: inherit
