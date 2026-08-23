@@ -1,0 +1,19 @@
+name: Review Agent
+
+# Provides code review (including approval) using Claude Code
+# by invoking the sibling reusable workflow this repo typically
+# provides to other repos changes in this repo.
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+
+permissions:
+  pull-requests: write
+  id-token: write
+  contents: read
+
+jobs:
+  review:
+    uses: ./review-agent.yml
+    secrets: inherit
