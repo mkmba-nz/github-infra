@@ -7,7 +7,7 @@ A single workflow with two modes:
 
 | Mode (input)   | Typical trigger (in consumer) | What it does                                                                                  |
 |----------------|-------------------------------|-----------------------------------------------------------------------------------------------|
-| `auto` (default) | `pull_request`              | Reviews on open/synchronize/etc. Skips silently if the diff was already reviewed, or if a human has stepped in on a bot-authored PR. |
+| `auto` (default) | `pull_request`              | Reviews on open/synchronize/etc. Skips silently if the PR is merged or closed, if the head commit is already approved, or if the diff was already reviewed. |
 | `requested`    | `pull_request_review_comment` | Re-reviews on demand. Skips dedupe, always runs, embeds the triggering comment body as reviewer special instructions. |
 
 Both modes share the same concurrency group (`pr-review-<number>`) with
@@ -42,12 +42,16 @@ otherwise enumerate.
 
 - **Bot login.** The review bot is the org-wide `mkmba-review-agent` App,
   hardcoded in the workflow. GraphQL `author.login` omits the `[bot]`
-  suffix for App actors, so the workflow matches reviews and comments
-  against the bare slug (`BOT_SLUG`) and passes the `[bot]`-suffixed login
-  to the review action as `bot_name`.
-- **Human vs agent.** The "is this a human reviewer?" check (auto mode
-  only) excludes any reviewer whose login ends in `-agent`. Org-wide
-  convention: every automated review-posting bot's slug ends in `-agent`.
+  suffix for App actors, so the workflow finds its own prior comments by
+  the bare slug (`BOT_SLUG`) and passes the `[bot]`-suffixed login to the
+  review action as `bot_name`. Reviews are matched by state, not by login:
+  who approved does not affect the decision.
+- **Approval is judged against the head SHA.** An approval counts only
+  while GitHub still reports it (not dismissed) *and* it was submitted
+  against the commit being reviewed. A new head is therefore never treated
+  as approved, whether or not the repo dismisses stale approvals — though
+  a push that leaves the diff unchanged can still be skipped by the
+  diff-hash dedupe below.
 - **Gateway ready** Sets up a Tailscale connection and sets environment
   variables in anticipation of the caller overriding the base URL to route
   reviews through a custom LLM gateway before Anthropic.  
@@ -182,24 +186,31 @@ The commands themselves are documented in the action's
 
 ## Skip / dedupe behaviour (auto mode only)
 
-1. **PR opened by a bot AND already approved by us AND a human has
-   reviewed since that approval** → skip entirely. Avoids tail-chasing on
-   agent-authored PRs that humans are actively reviewing.
-2. **Diff hash matches a prior review comment** → skip. The same SHA was
+1. **PR is merged or closed** → skip entirely. The review would land after
+   the decision it was meant to inform. The state is read once, when the
+   job starts: a merge that happens mid-review does not interrupt it.
+2. **The head SHA already has an undismissed approval, from anyone** →
+   skip entirely. Nothing a fresh review says takes that approval away, so
+   it can only add noise, or race a merge the approval has already cleared.
+   A reviewer's effective state is their latest `APPROVED` /
+   `CHANGES_REQUESTED` / `DISMISSED` review; `COMMENTED` reviews are ignored
+   and never revoke an approval. One approval is enough to skip, even where
+   another reviewer's requested changes are still holding up the merge.
+3. **Diff hash matches a prior review comment** → skip. The same SHA was
    reviewed; no work to do.
-3. **A prior review exists with a different diff hash** → re-review, but
+4. **A prior review exists with a different diff hash** → re-review, but
    in "focus on what's changed since the previous review" mode.
-4. **No prior review** → first-pass review.
-5. **The comment fetch itself fails** (e.g. a GitHub API blip) → the job
-   fails with an `::error::` annotation, and no review is posted.
+5. **No prior review** → first-pass review.
 
 Every review summary comment ends with a `diff-hash:<sha256>` marker that
 the dedupe logic reads on subsequent runs. Requested-mode re-reviews also
 emit this marker, so a subsequent auto-mode run on the same diff will
 correctly skip.
 
-Case 5 is deliberately fail-closed: if we cannot read the prior comments we
-cannot tell case 2 from case 4, and treating that as "no prior review" is
+All five cases are decided from one `gh pr view` fetch, and that fetch is
+deliberately fail-closed: if it fails (e.g. a GitHub API blip) the job fails
+with an `::error::` annotation and no review is posted. Without the data we
+cannot tell case 3 from case 5, and treating that as "no prior review" is
 what silently disabled the dedupe entirely for the workflow's first year.
 Re-run the job to recover from a transient failure.
 

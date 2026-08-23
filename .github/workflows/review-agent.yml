@@ -6,8 +6,8 @@ name: Review Agent (shared)
 # Two modes, selected by the `mode` input:
 #
 #   mode: auto      - Standard pull_request-triggered review. Runs the
-#                     PR-author-is-bot skip check and diff-hash dedupe.
-#                     May exit early without reviewing.
+#                     closed-PR and approved-head skip checks, plus
+#                     diff-hash dedupe. May exit early without reviewing.
 #
 #   mode: requested - Human-initiated re-review (typically triggered by
 #                     pull_request_review_comment). Skips all dedupe,
@@ -68,11 +68,9 @@ name: Review Agent (shared)
 #
 # CONVENTIONS this workflow relies on:
 #
-#   - All other review-agent bots in the org have logins ending in "-agent"
-#     (so the human-reviewer detection can exclude them with a single test).
 #   - The review bot's GraphQL author.login is the App slug without "[bot]"
-#     (GraphQL renders Bot actor logins this way) - so matching is done
-#     against the bare slug in BOT_SLUG.
+#     (GraphQL renders Bot actor logins this way) - so its own prior
+#     comments are matched against the bare slug in BOT_SLUG.
 
 on:
   workflow_call:
@@ -136,7 +134,7 @@ jobs:
           MODE: ${{ inputs.mode }}
           DIFF_HASH: ${{ steps.diff.outputs.diff_hash }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_AUTHOR_TYPE: ${{ github.event.pull_request.user.type }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           if [[ "$MODE" == "requested" ]]; then
             echo "should_run=true" >> $GITHUB_OUTPUT
@@ -145,37 +143,52 @@ jobs:
             exit 0
           fi
 
-          # mode=auto: skip if PR author is a bot AND a human has reviewed
-          # since the last bot approval (defer to the active human).
-          if [[ "$PR_AUTHOR_TYPE" == "Bot" ]]; then
-            REVIEWS=$(gh pr view "$PR_NUMBER" --json reviews --jq '.reviews')
-            LAST_APPROVAL_TIME=$(echo "$REVIEWS" | jq -r --arg bot "$BOT_SLUG" '
-              [.[] | select(.author.login == $bot) | select(.state == "APPROVED") | .submittedAt]
-              | sort | last // empty')
-            if [[ -n "$LAST_APPROVAL_TIME" ]]; then
-              # Any reviewer whose login does not end in "-agent" counts as human.
-              HUMAN_REVIEWS_AFTER=$(echo "$REVIEWS" | jq --arg t "$LAST_APPROVAL_TIME" '
-                [.[] | select(.author.login | test("-agent$") | not) | select(.submittedAt > $t)]
-                | length')
-              if [[ "${HUMAN_REVIEWS_AFTER:-0}" -gt 0 ]]; then
-                echo "should_run=false" >> $GITHUB_OUTPUT
-                echo "::notice::Skipping - human reviewer active since agent approval at $LAST_APPROVAL_TIME"
-                exit 0
-              fi
-            fi
-          fi
-
-          # mode=auto: dedupe by diff hash against prior bot comments.
-          # gh's --jq takes a filter string only - it is not jq and rejects jq
-          # flags like --arg - so the filter reads BOT_SLUG from the environment.
-          # Keep the fetch out of a pipeline: the default shell is `bash -e`
-          # without pipefail, so `gh ... | jq ...` would swallow a gh failure and
-          # silently degrade into "no prior reviews" - the defect fixed here.
-          if ! BOT_COMMENTS=$(gh pr view "$PR_NUMBER" --json comments \
-              --jq '.comments[] | select(.author.login == env.BOT_SLUG) | .body'); then
-            echo "::error::Could not fetch comments for PR #$PR_NUMBER - unable to tell whether diff-hash:$DIFF_HASH has already been reviewed"
+          # mode=auto: everything below decides whether a review could still
+          # change the outcome, and one fetch answers all of it. Fail closed
+          # on a fetch error: without this data we cannot tell a PR that needs
+          # reviewing from one that does not, and guessing either way is
+          # silent - an unnecessary review, or a review that never happens.
+          if ! PR=$(gh pr view "$PR_NUMBER" --json state,reviews,comments); then
+            echo "::error::Could not fetch PR #$PR_NUMBER - unable to tell whether a review is needed"
             exit 1
           fi
+
+          # The PR may have merged or closed while this run was queued (or
+          # while an earlier attempt was in flight). Reviewing now can only
+          # race the merge, so stop.
+          PR_STATE=$(jq -r '.state' <<<"$PR")
+          if [[ "$PR_STATE" != "OPEN" ]]; then
+            echo "should_run=false" >> $GITHUB_OUTPUT
+            echo "::notice::Skipping - PR is $PR_STATE, not OPEN"
+            exit 0
+          fi
+
+          # An undismissed approval of the head we are about to review means
+          # the PR can merge whatever we say, so a review would only race the
+          # merge. Reviews carry the SHA they were submitted against, so we
+          # check that rather than trusting that stale approvals were
+          # dismissed. A reviewer's effective state is their latest
+          # APPROVED / CHANGES_REQUESTED / DISMISSED review - a COMMENTED
+          # review neither grants nor revokes an approval.
+          APPROVERS=$(jq -r --arg head "$HEAD_SHA" '
+            [.reviews[] | select(.state | IN("APPROVED", "CHANGES_REQUESTED", "DISMISSED"))]
+            | group_by(.author.login)
+            | map(max_by(.submittedAt)
+                  | select(.state == "APPROVED" and .commit.oid == $head)
+                  | .author.login)
+            | join(", ")' <<<"$PR")
+          if [[ -n "$APPROVERS" ]]; then
+            echo "should_run=false" >> $GITHUB_OUTPUT
+            echo "::notice::Skipping - ${HEAD_SHA::7} is already approved by $APPROVERS"
+            exit 0
+          fi
+
+          # mode=auto: dedupe by diff hash against this bot's prior summary
+          # comments, out of the same fetch. This is jq itself rather than
+          # gh's --jq, so it takes --arg; handing --arg to gh's --jq is what
+          # left this filter broken and the dedupe dead for a year.
+          BOT_COMMENTS=$(jq -r --arg bot "$BOT_SLUG" \
+            '.comments[] | select(.author.login == $bot) | .body' <<<"$PR")
           EXACT_MATCH=$(echo "$BOT_COMMENTS" | grep "diff-hash:$DIFF_HASH" | tail -1 || true)
           PREVIOUS_HASH=$(echo "$BOT_COMMENTS" | grep -oP 'diff-hash:\K[a-f0-9]{64}' | tail -1 || true)
 
