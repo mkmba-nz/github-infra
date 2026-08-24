@@ -120,7 +120,7 @@ jobs:
       - name: Compute diff hash
         id: diff
         run: |
-          git fetch origin ${{ github.event.pull_request.base.ref }} --depth=1
+          git fetch origin ${{ github.event.pull_request.base.ref }}
           DIFF_HASH=$(git diff origin/${{ github.event.pull_request.base.ref }}...HEAD | sha256sum | cut -d' ' -f1)
           echo "diff_hash=$DIFF_HASH" >> $GITHUB_OUTPUT
           echo "::notice::Computed diff-hash:$DIFF_HASH"
