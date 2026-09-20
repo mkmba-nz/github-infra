@@ -116,8 +116,16 @@ jobs:
           cache-from: type=gha,scope=${{ inputs.repo-name }}
           cache-to: type=gha,mode=max,scope=${{ inputs.repo-name }}
           platforms: ${{ inputs.platforms }}
-          # Inject the RO GITHUB_PAT to Docker, so private go modules can be
-          # fetched during builds.
+          # Inject the RO GIT_PAT so private go modules can be fetched during builds.
+          # Use this channel: BuildKit mounts a secret only for the RUN that asks for
+          # it, so it reaches neither the layer nor its build history. See the README
+          # section "Fetching private modules" for the Dockerfile side.
+          secrets: |
+            github_pat=${{ secrets.GIT_PAT }}
+          # TRANSITIONAL: the same token as a build argument, which is recorded in the
+          # builder layer's build history that cache-to mode=max exports. Kept only so
+          # consumers can migrate to the secret one at a time; remove the GITHUB_PAT
+          # line once every consumer listed on FZ-2425 has migrated.
           build-args: |
             ${{ inputs.build-args }}
             GITHUB_PAT=${{ secrets.GIT_PAT }}
