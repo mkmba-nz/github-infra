@@ -216,3 +216,152 @@ Re-run the job to recover from a transient failure.
 
 In `requested` mode none of the above applies — the workflow always
 proceeds to the review step.
+
+# `build-and-push.yml`
+
+Reusable workflow that builds a Docker image with Buildx and pushes it to
+Amazon ECR, tagged with the triggering commit SHA.
+
+AWS credentials come from an OIDC role assumption (`role-to-assume`), so the
+consumer needs no static AWS keys. Layers are cached in the GitHub Actions
+cache, scoped by `repo-name`.
+
+## Required secrets
+
+This workflow declares no `workflow_call.secrets`, so the caller must use
+`secrets: inherit` — naming the secret explicitly is rejected as an undefined
+input.
+
+| Secret    | Purpose                                                                 |
+|-----------|-------------------------------------------------------------------------|
+| `GIT_PAT` | Read-only GitHub PAT for fetching private `github.com/mkmba-nz/…` modules during the build — see [Fetching private modules](#fetching-private-modules). |
+
+## Inputs
+
+| Input            | Required | Default         | Description                                                                 |
+|------------------|----------|-----------------|-----------------------------------------------------------------------------|
+| `role-to-assume` | yes      | -               | ARN of the IAM role to assume via OIDC for the ECR push                     |
+| `region`         | yes      | -               | AWS region of the target registry                                           |
+| `registries`     | no       | (none)          | Registry IDs to log in to; unset means the credentials' own account         |
+| `repo-name`      | yes      | -               | ECR repository name; also the layer-cache scope                             |
+| `context`        | yes      | -               | Docker build context path                                                   |
+| `file`           | no       | (none)          | Path to the Dockerfile relative to the workspace root; unset builds `<context>/Dockerfile` |
+| `target`         | no       | (none)          | Build stage to stop at; unset builds the final stage                        |
+| `build-args`     | no       | (none)          | Extra `NAME=value` build arguments, one per line                            |
+| `platforms`      | no       | `linux/amd64`   | Target platforms to build                                                   |
+| `runs-on`        | no       | `ubuntu-latest` | Runner label. Set `ubuntu-24.04-arm` to build `linux/arm64` natively rather than under QEMU |
+| `cache-mounts`   | no       | (none)          | Opt-in JSON cache-map persisting `RUN --mount=type=cache` mounts across runs, which the layer cache does not cover, e.g. `{"go-build-cache": "/root/.cache/go-build"}` |
+
+Only `platforms` and `runs-on` declare a default; the rest are simply unset,
+and the behaviour listed above is what the underlying actions do with an empty
+value.
+
+## Usage
+
+The caller must grant `id-token: write` — the reusable workflow cannot hold a
+permission the caller does not have, and without it the OIDC role assumption
+fails.
+
+```yaml
+# .github/workflows/build.yml in the consumer repo
+name: Build
+permissions:
+  id-token: write
+  contents: read
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    uses: mkmba-nz/github-infra/.github/workflows/build-and-push.yml@main
+    secrets: inherit
+    with:
+      region: ap-southeast-2
+      role-to-assume: arn:aws:iam::${{ vars.build_account_id }}:role/push-my-service
+      registries: ${{ vars.images_account_id }}
+      repo-name: my-service
+      context: .
+```
+
+`github-infra` carries no tags, so consumers pin `@main`, as the example does.
+
+## Fetching private modules
+
+`GIT_PAT` is mounted into the build as the BuildKit secret `github_pat`,
+readable at BuildKit's default target `/run/secrets/github_pat` for the
+duration of the single `RUN` that mounts it.
+
+Keeping it there is the consumer's job: **the token must not be written
+anywhere that survives the `RUN`.** Supply the URL rewrite to the module fetch
+itself, as shell-local environment on the same `RUN` that mounts the secret:
+
+```dockerfile
+# syntax=docker/dockerfile:1
+FROM golang:1.26 AS build
+ENV GOPRIVATE=github.com/mkmba-nz/*
+WORKDIR /src/my-service
+COPY go.mod go.sum ./
+RUN --mount=type=secret,id=github_pat \
+    GIT_CONFIG_COUNT=1 \
+    GIT_CONFIG_KEY_0="url.https://x-access-token:$(cat /run/secrets/github_pat)@github.com/mkmba-nz/.insteadOf" \
+    GIT_CONFIG_VALUE_0="https://github.com/mkmba-nz/" \
+    go mod download
+```
+
+- **Do not use `git config --global` to install the rewrite.** That writes the
+  token in cleartext to `/root/.gitconfig`, which is part of the layer's
+  filesystem — and this workflow's `cache-to: type=gha,mode=max` exports that
+  layer to the GitHub Actions cache, where anyone with access to the
+  repository's Actions environment can recover it. Mounting the secret and then
+  doing `git config --global` closes nothing.
+- The `GIT_CONFIG_*` assignments are shell-local, not `ENV`, so they are not
+  recorded in the image config either. Settings that carry no credential (say
+  `safe.directory`) are still fine as an ordinary `git config --global`.
+- **`x-access-token:` is load-bearing.** `https://<token>@github.com/` puts the
+  token in the username with no password, which git treats as incomplete
+  credentials: it tries to prompt, and `go mod download` sets
+  `GIT_TERMINAL_PROMPT=0`, so the fetch fails rather than authenticating.
+- The rewrite is scoped to the `mkmba-nz` prefix rather than all of
+  `https://github.com/`, so the token is only ever attached to requests for
+  this org's repositories.
+- `# syntax=docker/dockerfile:1` selects the BuildKit frontend; under the
+  classic builder `--mount` is a parse error. `GOPRIVATE` stops go resolving
+  these modules through the public proxy and checksum database, which it would
+  otherwise do without ever invoking git.
+- BuildKit mounts the secret `mode=0400` owned by root. A stage that has
+  switched to a non-root `USER` needs `--mount=type=secret,id=github_pat,uid=<uid>`
+  or it gets a permission denied on the `cat`.
+
+### Outside CI
+
+The same Dockerfile builds locally and on fly; only the way the secret is
+supplied changes. Both need `GITHUB_PAT` set to a read-only PAT in the calling
+shell, and `docker build` needs BuildKit (the default from Docker 23):
+
+```bash
+# local
+docker build --secret id=github_pat,env=GITHUB_PAT -t my-service .
+
+# fly
+fly deploy --build-secret github_pat="$GITHUB_PAT"
+```
+
+The `id=…,env=…` form is `docker build` syntax; flyctl's `--build-secret`
+takes plain `NAME=VALUE` pairs.
+
+Note that the rewritten URL contains the token, so git prints it in full in
+authentication error messages and under `GIT_TRACE` / `go mod download -x`.
+Actions masks registered secrets in workflow logs; a local or fly build has no
+such masking, so do not paste failing build output around.
+
+## Migration status
+
+The workflow also still passes the token as the `GITHUB_PAT` **build
+argument**, so a consumer that has not migrated keeps building. A consumer is
+fixed as soon as it mounts the secret and drops `ARG GITHUB_PAT` — BuildKit
+records a build argument in layer history only where the Dockerfile declares
+it. The workflow-side line and the removal condition are commented at
+`build-and-push.yml`; note that migrating does not clean the Actions cache,
+so finishing the job also needs a cache purge and a PAT rotation.
