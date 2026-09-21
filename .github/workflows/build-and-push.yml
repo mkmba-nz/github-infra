@@ -56,7 +56,14 @@ jobs:
   build-and-push:
     runs-on: ${{ inputs.runs-on }}
     steps:
+      # persist-credentials: false keeps the job's GITHUB_TOKEN out of the
+      # workspace .git/config, which a build context that includes .git would
+      # otherwise copy into a layer the cache-to below exports. Nothing after
+      # this step needs the git credential. See the README section "Fetching
+      # private modules".
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ inputs.role-to-assume }}
