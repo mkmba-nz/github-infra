@@ -324,6 +324,18 @@ RUN --mount=type=secret,id=github_pat \
   layer to the GitHub Actions cache, where anyone with access to the
   repository's Actions environment can recover it. Mounting the secret and then
   doing `git config --global` closes nothing.
+- **The workspace checkout holds no git credential.** The workflow checks out
+  with `persist-credentials: false`, so the
+  `http."https://github.com/".extraheader` carrying the job's `GITHUB_TOKEN` is
+  removed before the checkout step finishes, not left in `.git/config` for the
+  rest of the job. Without that, a build context including `.git` (as a Go build
+  needs, to stamp VCS info) copies the token into a layer — exported to the
+  Actions cache by the route above, and into the pushed image too where the copy
+  lands in the final stage. So a `git` operation inside the build inherits no
+  credential from the copied work tree: every authenticated fetch must use the
+  `GIT_PAT` workflow secret, as the `github_pat` secret above or the
+  transitional `GITHUB_PAT` build argument (`secrets.GIT_PAT` is the source
+  of both).
 - The `GIT_CONFIG_*` assignments are shell-local, not `ENV`, so they are not
   recorded in the image config either. Settings that carry no credential (say
   `safe.directory`) are still fine as an ordinary `git config --global`.
