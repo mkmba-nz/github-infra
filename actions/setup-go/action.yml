@@ -8,6 +8,26 @@ inputs:
   dockerfile:
     description: 'Use a go version matching the golang image in the specified Dockerfile'
     required: false
+  github-pat:
+    description: |
+      Read-only token for fetching private Go modules in later steps. Unset
+      (the default) leaves the action's behaviour unchanged.
+    required: false
+    default: ""
+  module-prefix:
+    description: |
+      Git URL prefix the token may authenticate, as `<host>/<owner>`.
+      Defaults to this repository's owner on github.com. Vanity module paths
+      resolve to these URLs via go-import metadata, so this is usually left
+      unset.
+    required: false
+    default: ""
+  goprivate:
+    description: |
+      Comma-separated module path patterns for GOPRIVATE, appended to any
+      existing value. Always exported, whether or not github-pat is set.
+    required: false
+    default: "mkmba.nz,oncall-optimizer.com"
 
 runs:
   using: composite
@@ -44,6 +64,56 @@ runs:
         cache: ${{ steps.go-sum.outputs.enabled == 'true' }}
         cache-dependency-path: ${{ steps.go-sum.outputs.paths }}
 
-    - name: Set GOTOOLCHAIN
+    - name: Set GOTOOLCHAIN and GOPRIVATE
       shell: bash
-      run: echo "GOTOOLCHAIN=local" >> $GITHUB_ENV
+      env:
+        GOPRIVATE_INPUT: ${{ inputs.goprivate }}
+      run: |
+        echo "GOTOOLCHAIN=local" >> "$GITHUB_ENV"
+        # GOPRIVATE is prefix-matched against module paths (mkmba.nz covers
+        # mkmba.nz/x), not against the git URL the go-import metadata names.
+        if [ -n "$GOPRIVATE_INPUT" ]; then
+          echo "GOPRIVATE=${GOPRIVATE:+${GOPRIVATE},}${GOPRIVATE_INPUT}" >> "$GITHUB_ENV"
+        fi
+
+    - name: Configure private module access
+      if: inputs.github-pat != ''
+      shell: bash
+      env:
+        # Passed via env, not interpolated into the script, so a token containing
+        # shell syntax cannot run.
+        GITHUB_PAT: ${{ inputs.github-pat }}
+        MODULE_PREFIX: ${{ inputs.module-prefix || format('github.com/{0}', github.repository_owner) }}
+      run: |
+        set -euo pipefail
+
+        # Actions masks `secrets.` values automatically but not `vars.` ones.
+        echo "::add-mask::$GITHUB_PAT"
+
+        PREFIX="${MODULE_PREFIX%/\*}"
+        PREFIX="${PREFIX%/}"
+        if [[ ! "$GITHUB_PAT" =~ ^[[:graph:]]+$ ]]; then
+          echo "::error::github-pat contains whitespace or non-printable characters"
+          exit 1
+        fi
+        if [[ ! "$PREFIX" =~ ^[A-Za-z0-9.-]+(/[A-Za-z0-9._-]+)+$ ]]; then
+          echo "::error::module-prefix must look like github.com/example-org (got '${PREFIX}')"
+          exit 1
+        fi
+
+        # The token lives in a 0600 file under RUNNER_TEMP, which only
+        # GitHub-hosted runners clear after the job (composite actions get no
+        # `post:` step); ~/.gitconfig just gains an include of it. One file per
+        # prefix, so a second call for another prefix adds a rewrite rather than
+        # replacing the first.
+        CONFIG="${RUNNER_TEMP}/setup-go-${PREFIX//\//-}.gitconfig"
+        ( umask 077 && : > "$CONFIG" )
+        # insteadOf embeds the token in the URL git contacts, so no credential
+        # helper is involved and none can shadow it. x-access-token is the
+        # username GitHub expects for token auth.
+        git config --file "$CONFIG" \
+          "url.https://x-access-token:${GITHUB_PAT}@${PREFIX}/.insteadOf" "https://${PREFIX}/"
+        git config --global --get-all include.path | grep -qxF "$CONFIG" \
+          || git config --global --add include.path "$CONFIG"
+
+        echo "::notice::Private module access configured for https://${PREFIX}/"
