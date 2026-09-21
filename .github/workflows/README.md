@@ -289,6 +289,14 @@ jobs:
 
 ## Fetching private modules
 
+This section covers fetching private modules **inside an image build**. A job
+that runs `go build`, `go test` or `govulncheck` directly on the runner instead
+passes the same `GIT_PAT` to
+[`actions/setup-go`](../../actions/setup-go/README.md) as its `github-pat`
+input, which wires up an `insteadOf` rewrite and `GOPRIVATE` for the rest of
+the job. The notes below on `x-access-token:`, org scoping and `GOPRIVATE`
+apply to both.
+
 `GIT_PAT` is mounted into the build as the BuildKit secret `github_pat`,
 readable at BuildKit's default target `/run/secrets/github_pat` for the
 duration of the single `RUN` that mounts it.
