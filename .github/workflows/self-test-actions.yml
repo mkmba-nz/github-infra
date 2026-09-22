@@ -1,0 +1,177 @@
+name: Self-test actions
+
+# Exercises the org-token path against the deployed broker, after the merge
+# rather than on the PR: `uses:` takes no expression, so on a pull request this
+# would test main's code and pass while the PR's was broken. The schedule
+# matters as much as the push trigger - the likeliest thing to break this path
+# is a change to the broker, which lives in another repository.
+#
+# To exercise a branch first, push it with the `uses:` refs below and this
+# `branches:` list temporarily pointed at it.
+on:
+  push:
+    branches: [main]
+    paths:
+      - actions/**
+      - .github/workflows/self-test-actions.yml
+  schedule:
+    # 19:00 UTC ~ 07:00 NZ: a broker that broke overnight is known before the
+    # day's first build finds out.
+    - cron: "0 19 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+# The later push is the one worth an answer.
+concurrency:
+  group: self-test-actions
+  cancel-in-progress: true
+
+jobs:
+  github-org-token:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Mint an org token
+        uses: mkmba-nz/github-infra/actions/github-org-token@main
+
+      - name: The token can read the contents of a private repository
+        id: first
+        env:
+          GH_TOKEN: ${{ env.MKMBA_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Never printed, and stderr dropped, because this log is public and an
+          # API error quotes back a list of the org's private repositories.
+          # Listing the installation proves only metadata access, so the
+          # assertion is a contents read against one of them; size > 0 skips an
+          # empty repository, whose contents endpoint 404s regardless.
+          REPO="$(gh api '/installation/repositories?per_page=100' \
+            --jq 'first(.repositories[] | select(.private and .size > 0) | .full_name) // empty' \
+            2>/dev/null || true)"
+          if [ -z "$REPO" ]; then
+            echo "::error::the minted token lists no private repository - check the App's installation scope"
+            exit 1
+          fi
+          if ! gh api "/repos/${REPO}/contents/" --silent 2>/dev/null; then
+            echo "::error::the minted token cannot read a private repository's contents - check the App's permissions"
+            exit 1
+          fi
+          echo "The minted token read a private repository's contents."
+
+          # How the next call is shown to have reused this token rather than
+          # minted another. Masked: not reversible, but derived from a live
+          # credential, and this log is public.
+          DIGEST="$(printf '%s' "$MKMBA_GITHUB_TOKEN" | sha256sum | cut -d' ' -f1)"
+          echo "::add-mask::${DIGEST}"
+          echo "expires-at=${MKMBA_GITHUB_TOKEN_EXPIRES_AT}" >> "$GITHUB_OUTPUT"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Mint again
+        uses: mkmba-nz/github-infra/actions/github-org-token@main
+
+      - name: The second call reused the first token
+        env:
+          FIRST_EXPIRES_AT: ${{ steps.first.outputs.expires-at }}
+          FIRST_DIGEST: ${{ steps.first.outputs.digest }}
+        run: |
+          set -euo pipefail
+
+          DIGEST="$(printf '%s' "$MKMBA_GITHUB_TOKEN" | sha256sum | cut -d' ' -f1)"
+          echo "::add-mask::${DIGEST}"
+          if [ "$DIGEST" != "$FIRST_DIGEST" ] || [ "$MKMBA_GITHUB_TOKEN_EXPIRES_AT" != "$FIRST_EXPIRES_AT" ]; then
+            echo "::error::the second call minted a fresh token instead of reusing the one already in the job"
+            exit 1
+          fi
+          echo "The second call reused the token already in the job."
+
+  missing-id-token-permission:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Replaces the workflow-level block to drop id-token: write, which is the
+    # failure this job exists to prove is diagnosed.
+    permissions:
+      contents: read
+    steps:
+      - name: Mint without id-token permission
+        id: mint
+        continue-on-error: true
+        uses: mkmba-nz/github-infra/actions/github-org-token@main
+
+      - name: It failed for the right reason, and left no token behind
+        env:
+          OUTCOME: ${{ steps.mint.outcome }}
+        run: |
+          set -euo pipefail
+
+          # Asserted first, so a failure from an unrelated cause - a missing
+          # script, an unreachable broker - cannot be read as this job passing.
+          if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || [ -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
+            echo "::error::this job was given the OIDC request variables, so it is not testing what it claims to - check its permissions block"
+            exit 1
+          fi
+          if [ "$OUTCOME" != "failure" ]; then
+            echo "::error::minting without id-token: write returned '${OUTCOME}' - it must fail rather than degrade"
+            exit 1
+          fi
+          if [ -n "${MKMBA_GITHUB_TOKEN:-}" ]; then
+            echo "::error::a token was exported by a job that cannot request an OIDC token"
+            exit 1
+          fi
+          echo "Minting without id-token: write failed, as it must."
+
+  setup-go:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: mkmba-nz/github-infra/actions/setup-go@main
+        with:
+          go-version: "1.26"
+
+      - name: setup-go wired the minted token into git
+        env:
+          GH_TOKEN: ${{ env.MKMBA_GITHUB_TOKEN }}
+          # git must fail rather than stop for a credential prompt if the
+          # rewrite is missing or carries a token that does not authenticate.
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+
+          # Asserts the rewrite was built from the token this job holds, not
+          # merely that some rewrite exists. The key carries the token, so it is
+          # matched, never printed.
+          REWRITES="https://github.com/mkmba-nz/"
+          if [ "$(git config --get "url.https://x-access-token:${MKMBA_GITHUB_TOKEN}@github.com/mkmba-nz/.insteadOf")" != "$REWRITES" ]; then
+            echo "::error::no insteadOf rewrite for ${REWRITES} built from this job's token"
+            exit 1
+          fi
+          if [ "$(go env GOPRIVATE)" != "mkmba.nz,oncall-optimizer.com" ]; then
+            echo "::error::GOPRIVATE is '$(go env GOPRIVATE)', not the action's default"
+            exit 1
+          fi
+
+          # The assertions above prove the wiring; this proves it works.
+          # ls-remote over https is the fetch `go mod download` performs for a
+          # private module, minus the module resolution: unauthenticated it
+          # fails, so a ref list means the rewrite supplied a credential GitHub
+          # accepted. The repository is discovered at run time, not named here.
+          REPO="$(gh api '/installation/repositories?per_page=100' \
+            --jq 'first(.repositories[] | select(.private and .size > 0) | .full_name) // empty' \
+            2>/dev/null || true)"
+          if [ -z "$REPO" ]; then
+            echo "::error::the minted token lists no private repository - check the App's installation scope"
+            exit 1
+          fi
+          if ! git ls-remote --heads "https://github.com/${REPO}" >/dev/null 2>&1; then
+            echo "::error::git could not reach a private repository through the rewrite setup-go configured"
+            exit 1
+          fi
+
+          echo "setup-go set GOPRIVATE, and git fetched from a private repository through the rewrite it configured."

@@ -1,0 +1,198 @@
+#!/usr/bin/env bash
+# Trades this job's GitHub Actions OIDC token for a short-lived, org-wide,
+# read-only GitHub token from github-token-broker. On success the token is
+# masked and appended to $GITHUB_ENV as MKMBA_GITHUB_TOKEN, with
+# MKMBA_GITHUB_TOKEN_EXPIRES_AT - so every *later* step in the job has them and
+# the calling step does not. See ../README.md.
+#
+# Usage: mint-org-token [<broker-url> [<audience>]]
+#
+# Both default below, and empty means "use the default", which is how an unset
+# action input arrives. They are arguments rather than environment so that a
+# workflow-level `env:` cannot redirect where this job's OIDC token is sent.
+set -euo pipefail
+
+if [ $# -gt 2 ]; then
+  echo "Usage: mint-org-token [<broker-url> [<audience>]]" >&2
+  exit 1
+fi
+
+# A raw Lambda Function URL, in the clear because it is not a secret: the broker
+# is declared authorization_type = "NONE", and verifying the OIDC token is the
+# only authentication it has. An org-level Actions variable is not open to us
+# anyway - a composite action cannot read the vars context.
+readonly DEFAULT_BROKER_URL="https://f6zznwkkpqmydp5z3rdmm4d4kq0fyeny.lambda-url.us-east-2.on.aws/"
+
+# An identifier, not a hostname to resolve; the broker accepts no other value.
+# Deliberately not sts.amazonaws.com, which every AWS trust policy in the org
+# pins, so a token minted for one is useless against the other.
+readonly DEFAULT_AUDIENCE="github-token-broker.mkmba.nz"
+
+# Re-mint this far ahead of expiry rather than hand a long step a lapsing token.
+readonly REUSE_MARGIN_SECONDS=300
+
+BROKER_URL_ARG="${1:-}"
+readonly BROKER_URL_ARG
+BROKER_URL="${BROKER_URL_ARG:-$DEFAULT_BROKER_URL}"
+AUDIENCE="${2:-}"
+AUDIENCE="${AUDIENCE:-$DEFAULT_AUDIENCE}"
+
+# Nothing is masked or exported before passing this: ::add-mask:: prints its
+# argument and $GITHUB_ENV is read as KEY=value lines, so a value carrying a
+# newline could inject a workflow command or declare further variables.
+is_word() { [[ "$1" =~ ^[[:graph:]]+$ ]]; }
+
+# A relative `uses: ./actions/...` resolves this script inside the workspace,
+# which on a pull request is content the author controls - not where a token
+# that reads every private repository in the org should come from. Checked here
+# rather than in each caller, so neither caller can omit it.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+readonly SCRIPT_DIR
+if [ -n "${GITHUB_WORKSPACE:-}" ] && WORKSPACE_DIR="$(cd -- "$GITHUB_WORKSPACE" 2>/dev/null && pwd -P)" \
+  && { [ "$SCRIPT_DIR" = "$WORKSPACE_DIR" ] || [[ "$SCRIPT_DIR" == "$WORKSPACE_DIR"/* ]]; }; then
+  echo "::error::${SCRIPT_DIR} is inside the workspace (${WORKSPACE_DIR}) - reference these actions by owner/repo@ref, not by a relative path"
+  exit 1
+fi
+
+if [ -z "${GITHUB_ENV:-}" ]; then
+  echo "::error::GITHUB_ENV is unset - mint-org-token has to run as a step of a GitHub Actions job"
+  exit 1
+fi
+
+# Named here so a self-hosted runner missing one says so, rather than surfacing
+# as the empty parse further down.
+for tool in curl jq; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "::error::${tool} is not installed on this runner - mint-org-token needs curl and jq"
+    exit 1
+  fi
+done
+
+# A second call in the same job re-registers the mask and stops, rather than
+# spending another mint on a token the job already holds. Checked before the
+# broker configuration below, so a second call needs none of it. A caller that
+# named a broker explicitly is asking for that broker, so it never takes this
+# path and cannot be handed a token from the default one.
+if [ -z "$BROKER_URL_ARG" ] \
+  && is_word "${MKMBA_GITHUB_TOKEN:-}" && is_word "${MKMBA_GITHUB_TOKEN_EXPIRES_AT:-}" \
+  && EXPIRY_EPOCH="$(date -u -d "$MKMBA_GITHUB_TOKEN_EXPIRES_AT" +%s 2>/dev/null)" \
+  && [ "$EXPIRY_EPOCH" -gt "$((${EPOCHSECONDS:-$(date -u +%s)} + REUSE_MARGIN_SECONDS))" ]; then
+  echo "::add-mask::${MKMBA_GITHUB_TOKEN}"
+  echo "::notice::Reusing the org token already in this job's environment (expires ${MKMBA_GITHUB_TOKEN_EXPIRES_AT}); no broker request made"
+  exit 0
+fi
+
+if [[ ! "$BROKER_URL" =~ ^https://[[:graph:]]+$ ]]; then
+  echo "::error::github-token-broker's endpoint is not a usable https:// URL (got '${BROKER_URL}'). Leave the broker-url input unset to use the default - see actions/github-org-token/README.md."
+  exit 1
+fi
+if ! is_word "$AUDIENCE"; then
+  echo "::error::audience must be a single printable word (got '${AUDIENCE}')"
+  exit 1
+fi
+
+# Injected into any job holding `id-token: write` and into no other, so their
+# absence has one cause and one fix. Forks are out of scope, so there is nothing
+# to degrade to.
+if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
+  echo "::error::this job cannot request a GitHub OIDC token - add 'id-token: write' to the job's permissions, keeping every permission the job already relies on. See actions/github-org-token/README.md."
+  exit 1
+fi
+
+# Both responses go to a file rather than stdout: curl truncates the file when
+# it retries but cannot un-write stdout, where a retried attempt's body would
+# arrive concatenated onto the failed one. mktemp creates it 0600, and it holds
+# a credential between the request and the parse, so it is removed on exit.
+RESPONSE_FILE="$(mktemp "${RUNNER_TEMP:-/tmp}/mint-org-token.XXXXXX")"
+readonly RESPONSE_FILE
+trap 'rm -f "$RESPONSE_FILE"' EXIT
+
+# Timeouts and retries are budgeted for a transient, not an outage: this is on
+# the critical path of every Go build in the org. --retry-all-errors is what
+# covers a DNS or TLS blip. Neither call passes --fail, so a 401 is never
+# retried and the status is diagnosed here instead. jq's stderr is dropped on
+# every parse below: the response it would quote back is a credential.
+#
+# last_status trims %{http_code} to the final attempt's - curl writes the
+# --write-out template once per transfer, and a retried request can be several.
+last_status() { echo "${1: -3}"; }
+
+if ! OIDC_STATUS="$(curl -sS --connect-timeout 5 --max-time 10 \
+  --retry 3 --retry-max-time 30 --retry-all-errors \
+  -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+  -H "Accept: application/json" \
+  -G --data-urlencode "audience=${AUDIENCE}" \
+  -o "$RESPONSE_FILE" -w '%{http_code}' \
+  "$ACTIONS_ID_TOKEN_REQUEST_URL")"; then
+  echo "::error::could not reach GitHub's OIDC endpoint to request a token for audience ${AUDIENCE}"
+  exit 1
+fi
+OIDC_STATUS="$(last_status "$OIDC_STATUS")"
+if [ "$OIDC_STATUS" != "200" ]; then
+  echo "::error::GitHub's OIDC endpoint returned HTTP ${OIDC_STATUS} for audience ${AUDIENCE}"
+  exit 1
+fi
+OIDC_TOKEN="$(jq -r '.value // empty' <"$RESPONSE_FILE" 2>/dev/null || true)"
+if ! is_word "$OIDC_TOKEN"; then
+  echo "::error::GitHub's OIDC endpoint returned no usable token for audience ${AUDIENCE}"
+  exit 1
+fi
+echo "::add-mask::${OIDC_TOKEN}"
+
+# In the Authorization header, so the OIDC token reaches neither a URL nor a
+# request body.
+if ! BROKER_STATUS="$(curl -sS --connect-timeout 5 --max-time 15 \
+  --retry 4 --retry-max-time 60 --retry-all-errors \
+  -X POST \
+  -H "Authorization: Bearer ${OIDC_TOKEN}" \
+  -H "Accept: application/json" \
+  -o "$RESPONSE_FILE" -w '%{http_code}' \
+  "$BROKER_URL")"; then
+  echo "::error::could not reach github-token-broker at ${BROKER_URL}"
+  exit 1
+fi
+BROKER_STATUS="$(last_status "$BROKER_STATUS")"
+
+# The broker answers every rejection identically by design, so the diagnosis is
+# written here rather than read out of the response; its log says which check
+# failed.
+case "$BROKER_STATUS" in
+200) ;;
+401)
+  echo "::error::github-token-broker rejected this job's OIDC token. It reports no reason by design; the usual causes are an audience other than ${AUDIENCE} and a repository outside the MKMBA org. The broker logs the reason."
+  exit 1
+  ;;
+502)
+  echo "::error::github-token-broker accepted this job's OIDC token but could not mint a GitHub token. Re-running may succeed."
+  exit 1
+  ;;
+*)
+  echo "::error::github-token-broker at ${BROKER_URL} returned HTTP ${BROKER_STATUS}"
+  exit 1
+  ;;
+esac
+
+# One call per field: joining them on a delimiter would split a value carrying
+# that delimiter into two well-formed-looking halves.
+TOKEN="$(jq -r '.token // empty' <"$RESPONSE_FILE" 2>/dev/null || true)"
+EXPIRES_AT="$(jq -r '.expires_at // empty' <"$RESPONSE_FILE" 2>/dev/null || true)"
+SELECTION="$(jq -r '.repository_selection // empty' <"$RESPONSE_FILE" 2>/dev/null || true)"
+
+if ! is_word "$TOKEN" || ! is_word "$EXPIRES_AT"; then
+  echo "::error::github-token-broker returned a 200 without a usable token and expiry"
+  exit 1
+fi
+echo "::add-mask::${TOKEN}"
+
+# A narrower installation still mints, so without this the failure surfaces as
+# an unexplained 404 in somebody's `go mod download`.
+if [ -n "$SELECTION" ] && [ "$SELECTION" != "all" ]; then
+  echo "::warning::github-token-broker's App installation is scoped to '${SELECTION}' repositories, not all of them - a private module outside that scope will 404"
+fi
+
+{
+  echo "MKMBA_GITHUB_TOKEN=${TOKEN}"
+  echo "MKMBA_GITHUB_TOKEN_EXPIRES_AT=${EXPIRES_AT}"
+} >> "$GITHUB_ENV"
+
+echo "::notice::Minted an org-wide read-only GitHub token as MKMBA_GITHUB_TOKEN, valid until ${EXPIRES_AT}"
