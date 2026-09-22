@@ -1,0 +1,43 @@
+name: GitHub org token
+description: |
+  Trades this job's GitHub Actions OIDC token for a short-lived, org-wide,
+  read-only GitHub token, and exports it as MKMBA_GITHUB_TOKEN for the rest of
+  the job. The caller wires in no secret, but the job needs id-token: write.
+  See the README.
+
+inputs:
+  broker-url:
+    description: |
+      github-token-broker's endpoint. Non-secret and defaulted; override only
+      to point a test run at another deployment.
+    required: false
+    default: ""
+  audience:
+    description: |
+      Audience the OIDC token is requested for. Non-secret and defaulted;
+      override only alongside broker-url.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Mint org read token
+      shell: bash
+      env:
+        BROKER_URL: ${{ inputs.broker-url }}
+        AUDIENCE: ${{ inputs.audience }}
+      run: |
+        set -euo pipefail
+
+        # Empty arguments mean "use the script's defaults", which live there
+        # because actions/setup-go calls the same script without passing here.
+        # `:?` so an unset action path is reported as itself, not as a missing
+        # /bin/mint-org-token.
+        SCRIPT="${GITHUB_ACTION_PATH:?is unset - cannot locate mint-org-token}/bin/mint-org-token"
+        if [ ! -x "$SCRIPT" ]; then
+          echo "::error::${SCRIPT} is missing or not executable - the action was not checked out intact"
+          exit 1
+        fi
+
+        "$SCRIPT" "$BROKER_URL" "$AUDIENCE"

@@ -8,12 +8,6 @@ inputs:
   dockerfile:
     description: 'Use a go version matching the golang image in the specified Dockerfile'
     required: false
-  github-pat:
-    description: |
-      Read-only token for fetching private Go modules in later steps. Unset
-      (the default) leaves the action's behaviour unchanged.
-    required: false
-    default: ""
   module-prefix:
     description: |
       Git URL prefix the token may authenticate, as `<host>/<owner>`.
@@ -25,7 +19,7 @@ inputs:
   goprivate:
     description: |
       Comma-separated module path patterns for GOPRIVATE, appended to any
-      existing value. Always exported, whether or not github-pat is set.
+      existing value.
     required: false
     default: "mkmba.nz,oncall-optimizer.com"
 
@@ -76,26 +70,41 @@ runs:
           echo "GOPRIVATE=${GOPRIVATE:+${GOPRIVATE},}${GOPRIVATE_INPUT}" >> "$GITHUB_ENV"
         fi
 
+    # The sibling's script, not the action: a composite action cannot `uses:` a
+    # sibling by relative path. See actions/github-org-token/README.md, which
+    # also covers pointing a test run at another broker.
+    - name: Mint org read token
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        SCRIPT="${GITHUB_ACTION_PATH:?is unset - cannot locate mint-org-token}/../github-org-token/bin/mint-org-token"
+        if [ ! -x "$SCRIPT" ]; then
+          echo "::error::${SCRIPT} is missing or not executable - this action and github-org-token must be checked out together"
+          exit 1
+        fi
+
+        "$SCRIPT"
+
+    # A separate step from the mint above on purpose: the token is exported
+    # through $GITHUB_ENV, which the step that writes it cannot read back.
     - name: Configure private module access
-      if: inputs.github-pat != ''
       shell: bash
       env:
-        # Passed via env, not interpolated into the script, so a token containing
-        # shell syntax cannot run.
-        GITHUB_PAT: ${{ inputs.github-pat }}
         MODULE_PREFIX: ${{ inputs.module-prefix || format('github.com/{0}', github.repository_owner) }}
       run: |
         set -euo pipefail
 
-        # Actions masks `secrets.` values automatically but not `vars.` ones.
-        echo "::add-mask::$GITHUB_PAT"
+        # Unreachable - the mint step fails the job first - but the alternative
+        # is bash's bare "unbound variable" further down, which names neither
+        # the step that was meant to set it nor the fix.
+        if [ -z "${MKMBA_GITHUB_TOKEN:-}" ]; then
+          echo "::error::MKMBA_GITHUB_TOKEN is not set - the preceding mint step did not export a token"
+          exit 1
+        fi
 
         PREFIX="${MODULE_PREFIX%/\*}"
         PREFIX="${PREFIX%/}"
-        if [[ ! "$GITHUB_PAT" =~ ^[[:graph:]]+$ ]]; then
-          echo "::error::github-pat contains whitespace or non-printable characters"
-          exit 1
-        fi
         if [[ ! "$PREFIX" =~ ^[A-Za-z0-9.-]+(/[A-Za-z0-9._-]+)+$ ]]; then
           echo "::error::module-prefix must look like github.com/example-org (got '${PREFIX}')"
           exit 1
@@ -112,7 +121,7 @@ runs:
         # helper is involved and none can shadow it. x-access-token is the
         # username GitHub expects for token auth.
         git config --file "$CONFIG" \
-          "url.https://x-access-token:${GITHUB_PAT}@${PREFIX}/.insteadOf" "https://${PREFIX}/"
+          "url.https://x-access-token:${MKMBA_GITHUB_TOKEN}@${PREFIX}/.insteadOf" "https://${PREFIX}/"
         git config --global --get-all include.path | grep -qxF "$CONFIG" \
           || git config --global --add include.path "$CONFIG"
 
