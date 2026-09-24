@@ -257,6 +257,25 @@ Only `platforms`, `runs-on` and `private-modules` declare a default; the rest ar
 and the behaviour listed above is what the underlying actions do with an empty
 value.
 
+**`cache-mounts` keeps nothing in the workspace.** Its keys name the host
+directory each mount is persisted through, and the workflow rehomes them under
+the runner's temporary directory before anything reads them; the scratch
+directory the injection step generates goes there too. The keys are labels, not
+paths the caller has to place: a build using `context: .` has the workspace as
+its build context, and a host directory or a generated Dancefile left there is
+an untracked file inside it, which makes `go build -buildvcs` read the tree as
+dirty and stamp every binary `(modified)`. A caller therefore needs no
+`.dockerignore` entry for these, and one written against the old behaviour is
+harmless. Only the cache-map's *values* — the mount targets — have to match the
+`RUN --mount=type=cache,target=...` lines in the Dockerfile.
+
+Because the keys are joined onto a path, each has to be a plain directory name;
+anything else is rejected with an error naming the input rather than quietly
+caching the wrong directory. The move also retires the caches saved under the
+old layout — an archive is unpacked where it was packed, so restoring one would
+put those directories back in the workspace — so the first build of each image
+after this lands populates its cache from cold.
+
 ## Usage
 
 The caller must grant `id-token: write` — the reusable workflow cannot hold a
