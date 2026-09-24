@@ -54,9 +54,11 @@ on:
         type: string
         description: |
           Opt-in persistence of BuildKit `RUN --mount=type=cache` mounts across runs (the
-          `type=gha` layer cache does NOT cover these). A JSON cache-map mapping a host
-          directory to each mount target in the Dockerfile, e.g.
+          `type=gha` layer cache does NOT cover these). A JSON cache-map naming the host
+          directory each mount target in the Dockerfile is persisted through, e.g.
             {"go-build-cache": "/root/.cache/go-build", "go-mod-cache": "/go/pkg"}
+          The keys are labels, not paths: this workflow keeps them under the runner's
+          temporary directory, never the workspace, which is the build context.
           Leave blank (default) to skip entirely - simple callers run no extra steps.
           Only worthwhile when the Dockerfile actually uses those cache mounts and the
           build layer using them is invalidated often (e.g. a Go build on every source change).
@@ -93,10 +95,41 @@ jobs:
       - name: Resolve cache-mount host directories
         id: cache-mounts
         if: ${{ inputs.cache-mounts != '' }}
+        env:
+          CACHE_MOUNTS: ${{ inputs.cache-mounts }}
         run: |
+          set -euo pipefail
+
+          # Each key is joined onto a path below, and the result is handed to
+          # actions/cache, which reads its `path` as glob patterns - so a key has to
+          # be a plain name. `..` would walk back into the workspace and undo the
+          # rehoming; a leading `!` or `#` would drop that directory from the cache.
+          # Asserted rather than documented, because both go wrong quietly.
+          if ! jq -e 'type == "object" and length > 0
+                      and all(keys[]; test("^[A-Za-z0-9._-]+$") and . != "." and . != "..")' \
+               <<<"$CACHE_MOUNTS" >/dev/null; then
+            echo "::error::cache-mounts must be a non-empty JSON object whose keys are plain directory names (letters, digits, dot, underscore, dash; not . or ..). See the workflows README."
+            exit 1
+          fi
+
+          # The keys are rehomed under RUNNER_TEMP rather than taken as
+          # workspace-relative names. A caller passing `context: .` builds from the
+          # workspace, so a host directory left there is an untracked file inside the
+          # build context: `go build -buildvcs` reads the tree as dirty and stamps
+          # every binary "(modified)". Only the keys move - the mount targets the
+          # caller wrote are what has to match the Dockerfile, and are untouched.
+          MAP="$(jq -c --arg root "$RUNNER_TEMP/cache-mounts" \
+            'with_entries(.key |= "\($root)/\(.)")' <<<"$CACHE_MOUNTS")"
+
+          # `dirs` is read back out of the rewritten map rather than derived from the
+          # input a second time, so the two cannot come to name a different set of
+          # directories for the same mounts.
           {
+            echo "map<<EOF"
+            echo "$MAP"
+            echo "EOF"
             echo "dirs<<EOF"
-            echo '${{ inputs.cache-mounts }}' | jq -r 'keys[]'
+            jq -r 'keys[]' <<<"$MAP"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
@@ -112,16 +145,27 @@ jobs:
           # and these are raw directory tarballs with no internal arch tagging, so an
           # amd64 cache restored into an arm64 build can yield unusable artefacts (e.g.
           # compiled native gem extensions).
-          key: ${{ runner.os }}-${{ runner.arch }}-cache-mounts-${{ inputs.repo-name }}-${{ github.sha }}
+          # v2 retires every entry saved before the host directories moved out of the
+          # workspace. An archive records where its members sit relative to the
+          # workspace and is unpacked from there, so an entry saved when they were
+          # workspace children restores as workspace children again, whatever path is
+          # asked for - putting back the untracked directories this move exists to
+          # remove. The first run per image after this rebuilds its cache.
+          key: ${{ runner.os }}-${{ runner.arch }}-cache-mounts-v2-${{ inputs.repo-name }}-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-cache-mounts-${{ inputs.repo-name }}-
+            ${{ runner.os }}-${{ runner.arch }}-cache-mounts-v2-${{ inputs.repo-name }}-
 
       - name: Inject cache mounts into BuildKit
         if: ${{ inputs.cache-mounts != '' }}
         uses: reproducible-containers/buildkit-cache-dance@v3.4.0
         with:
           dockerfile: ${{ inputs.file != '' && inputs.file || format('{0}/Dockerfile', inputs.context) }}
-          cache-map: ${{ inputs.cache-mounts }}
+          cache-map: ${{ steps.cache-mounts.outputs.map }}
+          # Same reason as the rehoming above: scratch-dir defaults to `scratch`,
+          # which the action resolves in the workspace and leaves its generated
+          # Dancefile in for the rest of the job - inside the build context, where no
+          # .dockerignore the caller writes can be expected to know about it.
+          scratch-dir: ${{ runner.temp }}/cache-mounts-scratch
 
       # Minted here, not by the caller: a called workflow runs as its own job, so
       # nothing the caller minted reaches it. @main is the self-reference
@@ -129,6 +173,27 @@ jobs:
       - name: Mint org read token
         if: ${{ inputs.private-modules }}
         uses: mkmba-nz/github-infra/actions/github-org-token@main
+
+      # This job's workspace is its own fresh checkout, so anything git reports here
+      # was left by a step above rather than by the caller. For a caller whose
+      # context includes it, that reaches the image, where `go build -buildvcs` reads
+      # it as a modified tree and stamps the binary "(modified)" - a wrong provenance
+      # record that nothing else surfaces. A warning rather than a failure: the cost
+      # is an inaccurate stamp, not a broken image, and this workflow is the single
+      # path every image build in the org takes.
+      - name: Warn if a step above dirtied the build context
+        env:
+          CONTEXT: ${{ inputs.context }}
+        run: |
+          set -euo pipefail
+          # `|| exit 0` and not `|| true`: a caller whose context is outside the
+          # repository has nothing to report, and reporting nothing is this step
+          # succeeding. It also keeps -e from turning that case into a failed build.
+          DIRT="$(git status --porcelain -- "$CONTEXT" 2>/dev/null)" || exit 0
+          if [ -n "$DIRT" ]; then
+            echo "::warning::${CONTEXT} is not clean, so a binary built from it with go's -buildvcs will stamp itself \"(modified)\". Paths below."
+            echo "$DIRT"
+          fi
 
       - name: Build, tag, and push docker image to Amazon ECR
         uses: docker/build-push-action@v6
