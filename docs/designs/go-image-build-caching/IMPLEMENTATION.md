@@ -18,7 +18,8 @@ This feature adopts research option A - **build in Docker with the layer cache o
 build method for every present and future MKMBA image holding a Go binary: modules in the
 `go mod download` layer, the private-module secret on that one `RUN`, native builds for arm64
 images, and cache-dance retired. It also settles the option's open design choices: the builder
-stage is pinned by digest and the export mode stays `mode=max`. The approved scope decisions are
+stage stays on a floating version tag (not pinned) and the export mode stays `mode=max`. The
+approved scope decisions are
 1A (design from the recorded runs, no live experiments), 2A (a standalone `docker build --secret`
 from a clean checkout is a requirement), 3A (container images; traefik is an exception, the Lambda
 follows the on-runner shape) and 4A (the `go mod download` layer may be exported to the Actions
@@ -48,7 +49,9 @@ implementation agent has read the runs named in Testing strategy. The five tasks
 of each other and may run concurrently. Every migration also removes any `ARG GITHUB_PAT` the
 Dockerfile still declares (the workflow passes that build argument on every build, and a declared
 `ARG` records it in exported layer history); each migration story carries this as its own
-criterion so it is checked at the pull request that changes the Dockerfile.
+criterion so it is checked at the pull request that changes the Dockerfile. "Matches the US-002
+template" covers both stages: a runtime stage still on `alpine:latest` moves to a version tag in
+the same change.
 
 #### US-001: `build-and-push.yml` picks the native runner for an arm64 build
 
@@ -85,8 +88,10 @@ one documented build pattern so that I can copy it rather than design my own.
       that presents one complete Dockerfile template and the caller's workflow inputs. The existing
       "Fetching private modules" section keeps the credential rules and its example `RUN` becomes a
       reference to the template rather than a second copy.
-- [ ] The template builder stage, in order: a `golang` image pinned by digest with the full tag
-      kept for readability (`FROM golang:<major.minor.patch>-<variant>@sha256:... AS build`); a
+- [ ] The template builder stage, in order: a `golang` image on a floating version tag written
+      literally (`FROM golang:<major.minor>[-<variant>] AS build`; no digest - see "Base image
+      tags" - and no build argument for the version, because `actions/setup-go` reads the minor
+      from the first literal `FROM golang:` line); a
       `git` install where the variant ships none (`apk add --no-cache git` on alpine - both the
       private-module fetch and the VCS stamp need it); `ENV GOPRIVATE=mkmba.nz,oncall-optimizer.com`
       (the module path prefixes, matching `actions/setup-go`'s default - not the `github.com/...`
@@ -95,19 +100,21 @@ one documented build pattern so that I can copy it rather than design my own.
       **no cache mount** on that `RUN`; then `COPY . .`, `safe.directory` for the work directory,
       and `go build` with `CGO_ENABLED=0` and `-buildvcs=true` on a `RUN` whose only mount is a
       cache mount at `/root/.cache/go-build` (the build cache). The template declares no
-      `ARG GITHUB_PAT` and no `ARG GOPRIVATE`. A repository whose `go.mod` names no private
-      module omits the secret mount and `GOPRIVATE`; everything else is identical.
-- [ ] The template runtime stage is a version-tagged base (`alpine:3.22`, `distroless/...`), not a
-      digest, so OS fixes reach shipped images on every rebuild; the section states the pinning
-      rationale from Technical Considerations ("Base image pinning") in two or three sentences,
-      including who bumps the pin and when.
+      `ARG GITHUB_PAT`, no `ARG GOPRIVATE` and no `ARG` for the Go version. A repository whose
+      `go.mod` names no private module omits the secret mount and `GOPRIVATE`; everything else is
+      identical.
+- [ ] The template runtime stage is a version-tagged base (`alpine:3.22`, `distroless/...`); the
+      section states in one sentence that both stages float on version tags, and says nothing
+      about pinning (the card dropped the concept; "Base image tags" records why).
 - [ ] The section states why each of these is load-bearing, each as one sentence: modules in the
       `go mod download` layer (the cold-mount failure is impossible); no module cache mount on
       the build `RUN` (a mount shadows the layer's modules and forces a re-download); the build
       cache mount is cold every run and nothing depends on it (it exists to keep compiled objects
       out of the layer that `mode=max` exports); the official `golang` image sets
-      `GOTOOLCHAIN=local`, so a `go.mod` newer than the pinned image fails at the download step
-      instead of fetching a toolchain that silently defeats the pin - do not unset it; `.dockerignore`
+      `GOTOOLCHAIN=local` - do not unset it - so a `go.mod` requiring a newer Go than the `FROM`
+      tag fails at the download step rather than fetching a toolchain that leaves the `FROM` line
+      (which `actions/setup-go` reads) stating a version the image no longer builds with;
+      `.dockerignore`
       must keep `.git` and must exclude no tracked file, because `-buildvcs` stamps `(modified)`
       for every tracked file missing from the copied tree; `safe.directory` carries no credential
       and keeps git working when the tree's owner differs from the build user. Cache mounts for
@@ -119,16 +126,14 @@ one documented build pattern so that I can copy it rather than design my own.
       module; `platforms: linux/arm64` for an arm64 image, with the runner chosen by the workflow
       (US-001); no `cache-mounts`.
 - [ ] Exceptions are listed with their reason: cgo builds (the litestream stages in oncall) use a
-      Debian-variant builder, static `-extldflags`, and their builder pin must also move on OS
-      rebuilds because libc is linked into the binary; traefik keeps its on-runner upstream
+      Debian-variant builder and static `-extldflags`; traefik keeps its on-runner upstream
       Makefile build; non-image Go builds (the github-token-broker Lambda in cloud-infra) use
       `actions/setup-go` on a native runner with `CGO_ENABLED=0`, `-trimpath` and an explicit
       `GOARCH`, which cloud-infra's `github-token-broker/build.sh` already does (verified during
       design; not in RESEARCH.md).
-- [ ] A "Verifying a build" paragraph says what a correct run looks like (the builder stage's
-      `FROM` resolves to the pinned digest, `go build` prints no `go: downloading` lines, the job
-      has no cache-mount steps) and repeats the "Outside CI" local build command as the
-      clean-checkout check.
+- [ ] A "Verifying a build" paragraph says what a correct run looks like (`go build` prints no
+      `go: downloading` lines, the job has no cache-mount steps) and repeats the "Outside CI"
+      local build command as the clean-checkout check.
 - [ ] The `cache-mounts` input documentation stays untouched in this story (US-008 removes it);
       the new section says the input is not used for Go images.
 
@@ -142,8 +147,8 @@ the standard so that the FZ-2522 failure class cannot recur.
       [tokenizer PR #13](https://github.com/mkmba-nz/tokenizer/pull/13) (FZ-2522) is merged or
       closed, and names it in the task prompt so the task invocation builds on it rather than
       conflicting with it.
-- [ ] `Dockerfile` matches the US-002 template: digest-pinned builder, modules in the
-      `go mod download` layer, secret on the download `RUN` only, build cache mount only on the
+- [ ] `Dockerfile` matches the US-002 template: modules in the `go mod download` layer, secret
+      on the download `RUN` only, build cache mount only on the
       build `RUN`, `COPY . .` replacing the selective source copies. The existing `-ldflags`
       (`main.Version` from `VERSION`, `main.FilteredHeaders`) and the post-build VCS stamp check
       stay.
@@ -168,7 +173,7 @@ the standard.
 **Acceptance Criteria:**
 - [ ] `Dockerfile` matches the US-002 template: the single `COPY . .` + one `RUN` arrangement is
       split into download and build steps, the secret moves from the build `RUN` to the download
-      `RUN`, the module cache mount is removed, the builder is pinned by digest.
+      `RUN`, the module cache mount is removed.
 - [ ] No stage of any Dockerfile this story changes declares `ARG GITHUB_PAT` after the change.
 - [ ] `deploy-staging.yml` no longer passes `cache-mounts`; the `.dockerignore` comment that
       references cache-mounts is removed or corrected.
@@ -183,8 +188,8 @@ deploy takes minutes rather than a quarter of an hour.
 **Acceptance Criteria:**
 - [ ] `Dockerfile` matches the US-002 template: the module cache mounts on both `RUN`s are
       removed, the repeated secret and `GIT_CONFIG_*` on the build `RUN` are removed (the comment
-      explaining why they were repeated goes with them), the builder is pinned by digest. The
-      existing `-trimpath -buildvcs=true -ldflags="-s -w"` and distroless runtime stage stay.
+      explaining why they were repeated goes with them). The existing
+      `-trimpath -buildvcs=true -ldflags="-s -w"` and distroless runtime stage stay.
 - [ ] No stage of any Dockerfile this story changes declares `ARG GITHUB_PAT` after the change.
 - [ ] `deploy-claude-proxy.yml` passes no `cache-mounts` and no `runs-on` (US-001 selects the
       runner).
@@ -202,9 +207,11 @@ deploy takes minutes rather than a quarter of an hour.
       repository root (`context: .`, which `-buildvcs` needs): `COPY fizzy/gh-webhook/go.mod
       fizzy/gh-webhook/go.sum` and `go mod download` precede `COPY . .` (today the source copy
       comes first, so every commit invalidates the download layer); a build cache mount is added
-      to the build `RUN` (today compiled objects land in the exported layer); the builder is
-      pinned by digest, replacing `ARG GO_VERSION`; `ARG GOPRIVATE` becomes the template's `ENV`;
-      `-buildvcs=true` is explicit and `safe.directory` is set.
+      to the build `RUN` (today compiled objects land in the exported layer); the literal
+      `FROM golang:<major.minor>-bookworm` tag replaces `ARG GO_VERSION`; `ARG GOPRIVATE` becomes
+      the template's `ENV`; `-buildvcs=true` is explicit and `safe.directory` is set. Trap: if
+      `deploy-gh-webhook.yml` passes `GO_VERSION` as a build argument, or a test job sets a
+      `go-version` to work around the build-argument `FROM`, those go in the same change.
 - [ ] No stage of any Dockerfile this story changes declares `ARG GITHUB_PAT` after the change.
 - [ ] `deploy-gh-webhook.yml` passes no `cache-mounts` and no `runs-on` (US-001 selects the
       runner).
@@ -218,11 +225,11 @@ way, with the repository's Actions cache no longer filled by cache-dance archive
 
 **Acceptance Criteria:**
 - [ ] `Dockerfile.solver` and `localoidc/Dockerfile` match the US-002 template (download/build
-      split, secret on the download `RUN`, module cache mounts removed, digest-pinned builder).
-      Solver's apt cache mounts may stay, cold every run.
+      split, secret on the download `RUN`, module cache mounts removed). Solver's apt cache
+      mounts may stay, cold every run.
 - [ ] No stage of any Dockerfile this story changes declares `ARG GITHUB_PAT` after the change.
 - [ ] The litestream stages in `Dockerfile` and `front/Dockerfile` follow the cgo exception: a
-      digest-pinned Debian-variant `golang` builder; the pinned-commit `git fetch` `RUN` keeps the
+      Debian-variant `golang` builder; the pinned-commit `git fetch` `RUN` keeps the
       secret mount (the fork is private); the build `RUN` keeps only a build cache mount. Trap:
       there is no `go.mod` in the context before the clone, so these stages have no separate
       download layer; modules download inside the build `RUN`, which needs no credential because
@@ -259,13 +266,15 @@ caching mechanism to explain.
 
 ## Non-Goals
 
-- Changing the layer-cache export mode (`mode=max` stays; see Open Questions).
+- Changing the layer-cache export mode or measuring `mode=min`: `mode=max` stays, and the project
+  owner recorded on the card that a `mode=min` follow-up is not wanted.
 - Finishing the FZ-2425 migration on the workflow side (the `GITHUB_PAT` build-argument line and
   the `GIT_PAT` Buildx token stay), or any change to `actions/setup-go`.
 - Moving traefik off its on-runner build, or any change to the github-token-broker Lambda, the
   litestream fork's own release workflow, dev-test's harness, or tsserve.
 - Live GHA experiments (1A): the design rests on the recorded runs in RESEARCH.md.
-- Automated digest bumps (Dependabot `docker` updates): see "Base image pinning".
+- Pinning the builder stage by digest or patch tag, and any machinery to bump such a pin: see
+  "Base image tags".
 - Purging existing Actions cache entries; cache-dance archives age out under the 7-day rule.
 
 ## Design Considerations
@@ -285,38 +294,21 @@ only once tokenizer PR #13 is merged or closed. The implementation agent opens U
 the US-003, US-004 and US-007 tasks have closed with success - those are the three repositories
 that pass `cache-mounts`.
 
-### Base image pinning
+### Base image tags
 
-Answers the card question on tag drift. The research found `golang:1.26-alpine` resolving to four
-digests across the sampled runs, invalidating the builder stage almost every run. The gain from
-pinning is modest - the base pull and the module download, since the build `RUN` is invalidated by
-every commit regardless - and the main value is determinism: the same commit builds against the
-same toolchain in dev and staging, and the image-rebuild convention already requires images to
-pin their base.
-
-- **Builder: pin by digest, not by patch tag.** Docker official image patch tags (`1.26.0`) are
-  rebuilt for OS updates until the next patch supersedes them, so a `-0` tag is only frozen after
-  `-1` exists; a digest is frozen from the start and is what BuildKit keys the cache on anyway.
-  For a `CGO_ENABLED=0` binary nothing in the builder's OS layer reaches the output, so OS
-  rebuilds of the builder can be ignored - the card's intuition holds for that case.
-- **What it overlooks: Go patch releases.** Standard-library security fixes (net/http, crypto)
-  are compiled into every binary, so the builder pin must move on Go patch releases, not stay at
-  the first revision of a minor. Two paths move it: Inspector flags the stdlib CVE in the binary
-  and the vulnerability-manager's image-rebuild task "updates the base image version", which for a
-  pinned builder means tag and digest together (Open Question 2 confirms this path); and a
-  dependency update that raises `go.mod`'s `go` directive past the pinned patch fails the image
-  build at the download step (`GOTOOLCHAIN=local`), which the test job on `check-latest: true`
-  would not catch, so the task making that update bumps the pin in the same PR. Staleness
-  rebuilds move it between those. Dependabot digest updates are not adopted: a PR per upstream
-  rebuild is the churn the pin exists to remove.
-- **cgo exception.** The litestream stages link libc statically, so builder OS content does reach
-  their binaries; their pin moves on OS rebuilds as well (same path - a finding against the
-  backups or front image).
-- **Runtime stage: version tag, not digest.** The final stage is one `COPY`, so its invalidation is
-  free, and a floating tag is how OS fixes reach shipped images on every rebuild.
-- `actions/setup-go`'s version extraction (`^FROM golang:([0-9]+\.[0-9]+)`) reads `1.26` from the
-  pinned form, so test jobs keep tracking the Dockerfile's minor; they run the latest patch
-  (`check-latest: true`) while the image runs the pinned one, which is accepted.
+Answers the card question on tag drift. Both stages float on version tags, as the inventory's
+Dockerfiles do today (none pins a digest): the builder on `golang:<major.minor>[-<variant>]`, the
+runtime on `alpine:3.22` or `distroless/...`. The research found `golang:1.26-alpine` resolving to
+four digests across the sampled runs, so the builder stage is rebuilt most runs; the project owner
+decided on the card that pinning the builder is complexity the cache benefit does not justify, and
+accepts the builder stage re-running when the tag moves. The floating tag is also how Go patch
+releases (whose standard-library fixes are compiled into every binary) and OS rebuilds reach an
+image: an ordinary rebuild picks them up, which is the image-rebuild skill's trigger-change path,
+the same as for every image today. A dependency update that raises `go.mod`'s `go` directive past
+the `FROM` tag's minor fails the image build at the download step (`GOTOOLCHAIN=local`) while the
+test job on `check-latest: true` still passes, so whoever makes that update raises the `FROM` tag
+in the same PR. `actions/setup-go` reads the minor from the first `FROM golang:` line, which is
+why the template writes the tag literally rather than through a build argument (US-006).
 
 ### Export mode and the build cache
 
@@ -335,13 +327,14 @@ builder stage rebuilds from scratch because its instructions changed (the cold c
 **next run whose change touches neither `go.mod` nor `go.sum`**, where the `go mod download`
 layer is reported `CACHED` and `go build` must still print no `go: downloading` lines (the warm
 layer, formerly cold mount, case that broke tokenizer). Both must succeed; the second may be the
-next routine deploy rather than a run made for the purpose.
+next routine deploy rather than a run made for the purpose. The warm case is only observable on a
+run where the `golang` tag has not moved since the previous one (the research found it moves most
+days), so if that deploy rebuilds the builder stage, the implementation agent waits for a later
+run that reports the layer `CACHED` rather than counting a cold run as the warm case.
 
 ### Integration points
 
 - tokenizer PR #13 (FZ-2522): US-003 builds on it.
-- The image-rebuild skill (agent-manager, outside this repository) says "update the base image
-  version"; with a digest pin that means tag and digest. Open Question 2.
 - oncall's Actions cache (9.3 GB of 10 GB): cache-dance archives (375 MB each for solver) stop
   being written at US-007; nothing is purged.
 
@@ -356,12 +349,4 @@ next routine deploy rather than a run made for the purpose.
 
 ## Open Questions
 
-1. `mode=min` would stop exporting the builder stage (no private source in the cache, 10-57 s less
-   export per run) at the cost of re-running the whole builder stage every run - base pull, git
-   install and module download - which the research did not measure. Not changed here because
-   the setting serves 18 call sites including non-Go images; a follow-up card can measure it on
-   one migrated image.
-2. Is the vulnerability-manager's image-rebuild path the intended mechanism for moving the builder
-   pin on Go patch releases, and does the image-rebuild skill (outside this repository) need a
-   sentence saying a digest pin is bumped as tag and digest together? If so, the project owner opens that
-   card in the agent-manager project; nothing in this PRD depends on it.
+None.
