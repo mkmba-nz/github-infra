@@ -249,13 +249,13 @@ input.
 | `target`         | no       | (none)          | Build stage to stop at; unset builds the final stage                        |
 | `build-args`     | no       | (none)          | Extra `NAME=value` build arguments, one per line                            |
 | `platforms`      | no       | `linux/amd64`   | Target platforms to build                                                   |
-| `runs-on`        | no       | `ubuntu-latest` | Runner label. Set `ubuntu-24.04-arm` to build `linux/arm64` natively rather than under QEMU |
+| `runs-on`        | no       | from `platforms` | Runner label. Unset, it is derived from `platforms`: `ubuntu-26.04-arm` for exactly `linux/arm64` (a native build rather than QEMU), `ubuntu-26.04` otherwise. A label set here is always used; one that emulates a single-platform build logs a warning |
 | `private-modules`| no       | `false`         | Mint a short-lived org-wide read-only token for the build and mount it as the BuildKit secret `github_token` in place of `GIT_PAT` — see [Fetching private modules](#fetching-private-modules) |
 | `cache-mounts`   | no       | (none)          | Opt-in JSON cache-map persisting `RUN --mount=type=cache` mounts across runs, which the layer cache does not cover, e.g. `{"go-build-cache": "/root/.cache/go-build"}` |
 
-Only `platforms`, `runs-on` and `private-modules` declare a default; the rest are simply unset,
-and the behaviour listed above is what the underlying actions do with an empty
-value.
+Only `platforms` and `private-modules` declare a default, and `runs-on` is
+derived from `platforms` when unset; the rest are simply unset, and the
+behaviour listed above is what the underlying actions do with an empty value.
 
 **`cache-mounts` keeps nothing in the workspace.** Its keys name the host
 directory each mount is persisted through, and the workflow rehomes them under
