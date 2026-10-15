@@ -251,30 +251,10 @@ input.
 | `platforms`      | no       | `linux/amd64`   | Target platforms to build                                                   |
 | `runs-on`        | no       | from `platforms` | Runner label. Unset, it is derived from `platforms`: `ubuntu-26.04-arm` for exactly `linux/arm64` (a native build rather than QEMU), `ubuntu-26.04` otherwise. A label set here is always used; one that emulates a single-platform build logs a warning |
 | `private-modules`| no       | `false`         | Mint a short-lived org-wide read-only token for the build and mount it as the BuildKit secret `github_token` in place of `GIT_PAT` — see [Fetching private modules](#fetching-private-modules) |
-| `cache-mounts`   | no       | (none)          | Opt-in JSON cache-map persisting `RUN --mount=type=cache` mounts across runs, which the layer cache does not cover, e.g. `{"go-build-cache": "/root/.cache/go-build"}` |
 
 Only `platforms` and `private-modules` declare a default, and `runs-on` is
 derived from `platforms` when unset; the rest are simply unset, and the
 behaviour listed above is what the underlying actions do with an empty value.
-
-**`cache-mounts` keeps nothing in the workspace.** Its keys name the host
-directory each mount is persisted through, and the workflow rehomes them under
-the runner's temporary directory before anything reads them; the scratch
-directory the injection step generates goes there too. The keys are labels, not
-paths the caller has to place: a build using `context: .` has the workspace as
-its build context, and a host directory or a generated Dancefile left there is
-an untracked file inside it, which makes `go build -buildvcs` read the tree as
-dirty and stamp every binary `(modified)`. A caller therefore needs no
-`.dockerignore` entry for these, and one written against the old behaviour is
-harmless. Only the cache-map's *values* — the mount targets — have to match the
-`RUN --mount=type=cache,target=...` lines in the Dockerfile.
-
-Because the keys are joined onto a path, each has to be a plain directory name;
-anything else is rejected with an error naming the input rather than quietly
-caching the wrong directory. The move also retires the caches saved under the
-old layout — an archive is unpacked where it was packed, so restoring one would
-put those directories back in the workspace — so the first build of each image
-after this lands populates its cache from cold.
 
 ## Usage
 
@@ -393,8 +373,7 @@ The caller's side:
 ```
 
 Leave `runs-on` unset so the workflow picks a native runner for a
-single-platform build (see the `build-and-push.yml` Inputs table above). The
-`cache-mounts` input is not used for Go images.
+single-platform build (see the `build-and-push.yml` Inputs table above).
 
 ### Exceptions
 
@@ -412,9 +391,9 @@ These do not follow the template:
 ### Verifying a build
 
 In a correct run, the build step's log shows no `go: downloading` lines under
-`go build` (every module came from the download layer), and the job has no
-cache-mount steps. The run that proves it is one where the `go mod download`
-step is reported `CACHED` but `go build` still runs. The clean-checkout check
+`go build` (every module came from the download layer). The run that proves it
+is one where the `go mod download` step is reported `CACHED` but `go build`
+still runs. The clean-checkout check
 is the local build from [Outside CI](#outside-ci), run from a fresh clone
 (without the `--secret` for a repository that fetches no private module):
 

@@ -52,19 +52,6 @@ on:
           BuildKit secret `github_token`, in place of the `GIT_PAT` org secret. Nothing
           is minted when false. Moves only that one use off the PAT - see the README's
           "Migration status".
-      cache-mounts:
-        required: false
-        type: string
-        description: |
-          Opt-in persistence of BuildKit `RUN --mount=type=cache` mounts across runs (the
-          `type=gha` layer cache does NOT cover these). A JSON cache-map naming the host
-          directory each mount target in the Dockerfile is persisted through, e.g.
-            {"go-build-cache": "/root/.cache/go-build", "go-mod-cache": "/go/pkg"}
-          The keys are labels, not paths: this workflow keeps them under the runner's
-          temporary directory, never the workspace, which is the build context.
-          Leave blank (default) to skip entirely - simple callers run no extra steps.
-          Only worthwhile when the Dockerfile actually uses those cache mounts and the
-          build layer using them is invalidated often (e.g. a Go build on every source change).
 
 jobs:
   build-and-push:
@@ -93,84 +80,6 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
         with:
           registries: ${{ inputs.registries }}
-
-      # The following two steps only run when `cache-mounts` is set; they persist the
-      # contents of BuildKit `RUN --mount=type=cache` mounts (which the type=gha layer
-      # cache below does not), so e.g. Go module/build caches survive between runs.
-      - name: Resolve cache-mount host directories
-        id: cache-mounts
-        if: ${{ inputs.cache-mounts != '' }}
-        env:
-          CACHE_MOUNTS: ${{ inputs.cache-mounts }}
-        run: |
-          set -euo pipefail
-
-          # Each key is joined onto a path below, and the result is handed to
-          # actions/cache, which reads its `path` as glob patterns - so a key has to
-          # be a plain name. `..` would walk back into the workspace and undo the
-          # rehoming; a leading `!` or `#` would drop that directory from the cache.
-          # Asserted rather than documented, because both go wrong quietly.
-          if ! jq -e 'type == "object" and length > 0
-                      and all(keys[]; test("^[A-Za-z0-9._-]+$") and . != "." and . != "..")' \
-               <<<"$CACHE_MOUNTS" >/dev/null; then
-            echo "::error::cache-mounts must be a non-empty JSON object whose keys are plain directory names (letters, digits, dot, underscore, dash; not . or ..). See the workflows README."
-            exit 1
-          fi
-
-          # The keys are rehomed under RUNNER_TEMP rather than taken as
-          # workspace-relative names. A caller passing `context: .` builds from the
-          # workspace, so a host directory left there is an untracked file inside the
-          # build context: `go build -buildvcs` reads the tree as dirty and stamps
-          # every binary "(modified)". Only the keys move - the mount targets the
-          # caller wrote are what has to match the Dockerfile, and are untouched.
-          MAP="$(jq -c --arg root "$RUNNER_TEMP/cache-mounts" \
-            'with_entries(.key |= "\($root)/\(.)")' <<<"$CACHE_MOUNTS")"
-
-          # `dirs` is read back out of the rewritten map rather than derived from the
-          # input a second time, so the two cannot come to name a different set of
-          # directories for the same mounts.
-          {
-            echo "map<<EOF"
-            echo "$MAP"
-            echo "EOF"
-            echo "dirs<<EOF"
-            jq -r 'keys[]' <<<"$MAP"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Restore BuildKit cache mounts
-        if: ${{ inputs.cache-mounts != '' }}
-        uses: actions/cache@v4
-        with:
-          path: ${{ steps.cache-mounts.outputs.dirs }}
-          # github.sha rolls the key every run so the restored cache is always re-saved
-          # with new entries (actions/cache never updates an existing key); restore-keys
-          # falls back to the most recent prior cache for this image.
-          # runner.arch keeps X64 and ARM64 caches apart - runner.os is `Linux` for both,
-          # and these are raw directory tarballs with no internal arch tagging, so an
-          # amd64 cache restored into an arm64 build can yield unusable artefacts (e.g.
-          # compiled native gem extensions).
-          # v2 retires every entry saved before the host directories moved out of the
-          # workspace. An archive records where its members sit relative to the
-          # workspace and is unpacked from there, so an entry saved when they were
-          # workspace children restores as workspace children again, whatever path is
-          # asked for - putting back the untracked directories this move exists to
-          # remove. The first run per image after this rebuilds its cache.
-          key: ${{ runner.os }}-${{ runner.arch }}-cache-mounts-v2-${{ inputs.repo-name }}-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-cache-mounts-v2-${{ inputs.repo-name }}-
-
-      - name: Inject cache mounts into BuildKit
-        if: ${{ inputs.cache-mounts != '' }}
-        uses: reproducible-containers/buildkit-cache-dance@v3.4.0
-        with:
-          dockerfile: ${{ inputs.file != '' && inputs.file || format('{0}/Dockerfile', inputs.context) }}
-          cache-map: ${{ steps.cache-mounts.outputs.map }}
-          # Same reason as the rehoming above: scratch-dir defaults to `scratch`,
-          # which the action resolves in the workspace and leaves its generated
-          # Dancefile in for the rest of the job - inside the build context, where no
-          # .dockerignore the caller writes can be expected to know about it.
-          scratch-dir: ${{ runner.temp }}/cache-mounts-scratch
 
       # Minted here, not by the caller: a called workflow runs as its own job, so
       # nothing the caller minted reaches it. @main is the self-reference
