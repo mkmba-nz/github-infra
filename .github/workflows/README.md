@@ -307,6 +307,121 @@ jobs:
 
 `github-infra` carries no tags, so consumers pin `@main`, as the example does.
 
+## Building a Go image
+
+Every image holding a Go binary is built one way, bar the
+[exceptions](#exceptions) below: in Docker, with the layer cache as its only
+cache. Copy this Dockerfile and change the names, the Go version and the
+runtime stage:
+
+```dockerfile
+# syntax=docker/dockerfile:1
+FROM golang:1.26-alpine AS build
+RUN apk add --no-cache git
+ENV GOPRIVATE=mkmba.nz,oncall-optimizer.com
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN --mount=type=secret,id=github_token,required=true \
+    GIT_CONFIG_COUNT=1 \
+    GIT_CONFIG_KEY_0="url.https://x-access-token:$(cat /run/secrets/github_token)@github.com/mkmba-nz/.insteadOf" \
+    GIT_CONFIG_VALUE_0="https://github.com/mkmba-nz/" \
+    go mod download
+COPY . .
+RUN git config --global --add safe.directory /src
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -buildvcs=true -o /out/my-service .
+
+FROM alpine:3.22
+COPY --from=build /out/my-service /usr/local/bin/my-service
+ENTRYPOINT ["/usr/local/bin/my-service"]
+```
+
+A repository whose `go.mod` names no private module drops the secret mount,
+the `GIT_CONFIG_*` assignments and `GOPRIVATE`; everything else stays the same.
+The template declares no `ARG` at all. In particular there is no `ARG GITHUB_PAT`,
+which would record the workflow's transitional build argument in layer history
+(see [Migration status](#migration-status)), and no `ARG` for the Go version.
+
+- The `FROM golang:` tag is written literally, at the Go minor version (with a
+  variant such as `-alpine` or `-bookworm` if wanted), because
+  [`actions/setup-go`](../../actions/setup-go/README.md) reads the version from
+  the first `FROM golang:` line, and a build argument there gives it nothing to
+  read.
+- `git` is installed where the variant ships none (alpine), because both the
+  private-module fetch and `-buildvcs` need it.
+- `GOPRIVATE` names the module path prefixes (the vanity domains, matching
+  `actions/setup-go`'s default), not the `github.com/mkmba-nz` URL the
+  modules are fetched from, which a vanity import path never matches.
+- Both stages float on version tags (`golang:<major.minor>[-<variant>]` and
+  `alpine:3.22` or a `distroless` image), so an ordinary rebuild picks up Go
+  patch releases and OS fixes.
+- **Modules live in the `go mod download` layer**, so whenever that step is
+  served from the layer cache its modules come with it, and `go build` can never
+  find them missing the way it does when they sit in a cache mount that starts
+  empty.
+- **No module cache mount on the build `RUN`** (nor on the download `RUN`):
+  a mount at the module cache shadows the layer's modules, so `go build`
+  downloads them again, which fails for a private module because the build
+  `RUN` has no credential.
+- **The build cache mount is cold every CI run and nothing depends on it**: it
+  exists only to keep compiled objects out of the builder layer that the
+  workflow's `cache-to: type=gha,mode=max` exports to the Actions cache.
+- The official `golang` image sets `GOTOOLCHAIN=local` — do not unset it — so a
+  `go.mod` requiring a newer Go than the `FROM` tag fails at the download step
+  (and whoever raises the `go` directive raises the tag in the same change)
+  rather than fetching a toolchain that leaves the `FROM` line, which
+  `actions/setup-go` reads, naming a version the image no longer builds with.
+- `.dockerignore` must keep `.git` and must exclude no tracked file (check it
+  against `git ls-files`), because `-buildvcs` stamps the binary `(modified)`
+  when a tracked file is missing from the copied tree.
+- `safe.directory` carries no credential, and it keeps git working when the
+  copied tree's owner differs from the build user.
+- Cache mounts for non-Go steps (an `apt` cache, say) are allowed on the same
+  terms: cold every run, with nothing depending on them.
+
+A build whose context is a subdirectory of the repository rather than its root
+has no `.git` to stamp from, so it sets `-buildvcs=false` explicitly instead.
+`-buildvcs=true` is the template's default.
+
+The caller's side:
+
+```yaml
+    with:
+      # ...the inputs from Usage above, plus:
+      private-modules: true      # only when go.mod names a private module
+      platforms: linux/arm64     # only for an arm64 image
+```
+
+Leave `runs-on` unset so the workflow picks a native runner for a
+single-platform build (see the `build-and-push.yml` Inputs table above). The
+`cache-mounts` input is not used for Go images.
+
+### Exceptions
+
+These do not follow the template:
+
+- **cgo builds** (such as a SQLite-linking stage built inside an image) link
+  libc, so they use a Debian-variant `golang` builder and static `-extldflags`.
+- **Images of an upstream project with its own complex build** keep building
+  on the runner through the upstream Makefile, with the Dockerfile only copying
+  the output in.
+- **Go builds that are not images** (such as the GitHub token broker Lambda)
+  build on the runner with `actions/setup-go` on a native runner, with
+  `CGO_ENABLED=0`, `-trimpath` and an explicit `GOARCH`.
+
+### Verifying a build
+
+In a correct run, the build step's log shows no `go: downloading` lines under
+`go build` (every module came from the download layer), and the job has no
+cache-mount steps. The run that proves it is one where the `go mod download`
+step is reported `CACHED` but `go build` still runs. The clean-checkout check
+is the local build from [Outside CI](#outside-ci), run from a fresh clone
+(without the `--secret` for a repository that fetches no private module):
+
+```bash
+docker build --secret id=github_token,env=GITHUB_PAT -t my-service .
+```
+
 ## Fetching private modules
 
 This section covers fetching private modules **inside an image build**. A job
@@ -331,20 +446,9 @@ Setting it takes the PAT out of **this** channel only — see
 
 Keeping it there is the consumer's job: **the token must not be written
 anywhere that survives the `RUN`.** Supply the URL rewrite to the module fetch
-itself, as shell-local environment on the same `RUN` that mounts the secret:
-
-```dockerfile
-# syntax=docker/dockerfile:1
-FROM golang:1.26 AS build
-ENV GOPRIVATE=github.com/mkmba-nz/*
-WORKDIR /src/my-service
-COPY go.mod go.sum ./
-RUN --mount=type=secret,id=github_token \
-    GIT_CONFIG_COUNT=1 \
-    GIT_CONFIG_KEY_0="url.https://x-access-token:$(cat /run/secrets/github_token)@github.com/mkmba-nz/.insteadOf" \
-    GIT_CONFIG_VALUE_0="https://github.com/mkmba-nz/" \
-    go mod download
-```
+itself, as shell-local environment on the same `RUN` that mounts the secret,
+exactly as the `go mod download` step of the
+[Go image template](#building-a-go-image) does.
 
 - **Do not use `git config --global` to install the rewrite.** That writes the
   token in cleartext to `/root/.gitconfig`, which is part of the layer's
