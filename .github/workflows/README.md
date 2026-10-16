@@ -228,13 +228,9 @@ cache, scoped by `repo-name`.
 
 ## Required secrets
 
-This workflow declares no `workflow_call.secrets`, so the caller must use
-`secrets: inherit` — naming the secret explicitly is rejected as an undefined
-input.
-
-| Secret    | Purpose                                                                 |
-|-----------|-------------------------------------------------------------------------|
-| `GIT_PAT` | Read-only GitHub PAT. Still required by every build, including one setting `private-modules: true`, which moves only one of its three uses off it — see [Migration status](#migration-status). |
+This workflow needs no secret. It declares no `workflow_call.secrets`, so a caller
+that passes secrets for other reasons must use `secrets: inherit` — naming a
+secret explicitly is rejected as an undefined input.
 
 ## Inputs
 
@@ -250,7 +246,7 @@ input.
 | `build-args`     | no       | (none)          | Extra `NAME=value` build arguments, one per line                            |
 | `platforms`      | no       | `linux/amd64`   | Target platforms to build                                                   |
 | `runs-on`        | no       | from `platforms` | Runner label. Unset, it is derived from `platforms`: `ubuntu-26.04-arm` for exactly `linux/arm64` (a native build rather than QEMU), `ubuntu-26.04` otherwise. A label set here is always used; one that emulates a single-platform build logs a warning |
-| `private-modules`| no       | `false`         | Mint a short-lived org-wide read-only token for the build and mount it as the BuildKit secret `github_token` in place of `GIT_PAT` — see [Fetching private modules](#fetching-private-modules) |
+| `private-modules`| no       | `false`         | Mint a short-lived org-wide read-only token for the build and mount it as the BuildKit secret `github_token`; unset, no credential is mounted — see [Fetching private modules](#fetching-private-modules) |
 
 Only `platforms` and `private-modules` declare a default, and `runs-on` is
 derived from `platforms` when unset; the rest are simply unset, and the
@@ -319,8 +315,7 @@ ENTRYPOINT ["/usr/local/bin/my-service"]
 A repository whose `go.mod` names no private module drops the secret mount,
 the `GIT_CONFIG_*` assignments and `GOPRIVATE`; everything else stays the same.
 The template declares no `ARG` at all. In particular there is no `ARG GITHUB_PAT`,
-which would record the workflow's transitional build argument in layer history
-(see [Migration status](#migration-status)), and no `ARG` for the Go version.
+which would capture any `GITHUB_PAT` value a caller passes via `inputs.build-args`, and no `ARG` for the Go version.
 
 - The `FROM golang:` tag is written literally, at the Go minor version (with a
   variant such as `-alpine` or `-bookworm` if wanted), because
@@ -417,11 +412,7 @@ duration of the single `RUN` that mounts it. Which credential depends on
 token per run through
 [`actions/github-org-token`](../../actions/github-org-token/README.md), needing
 no secret from the caller and no permission beyond the `id-token: write`
-[Usage](#usage) already requires; unset, the shared `GIT_PAT` org secret is
-mounted as before. The Dockerfile side is the same either way.
-
-Setting it takes the PAT out of **this** channel only — see
-[Migration status](#migration-status).
+[Usage](#usage) already requires; unset, no credential is mounted.
 
 Keeping it there is the consumer's job: **the token must not be written
 anywhere that survives the `RUN`.** Supply the URL rewrite to the module fetch
@@ -444,7 +435,7 @@ exactly as the `go mod download` step of the
   Actions cache by the route above, and into the pushed image too where the copy
   lands in the final stage. So a `git` operation inside the build inherits no
   credential from the copied work tree: every authenticated fetch must use the
-  `github_token` secret above, or the transitional `GITHUB_PAT` build argument.
+  `github_token` secret above.
 - The `GIT_CONFIG_*` assignments are shell-local, not `ENV`, so they are not
   recorded in the image config either. Settings that carry no credential (say
   `safe.directory`) are still fine as an ordinary `git config --global`.
@@ -484,36 +475,6 @@ Note that the rewritten URL contains the token, so git prints it in full in
 authentication error messages and under `GIT_TRACE` / `go mod download -x`.
 Actions masks registered secrets in workflow logs; a local or fly build has no
 such masking, so do not paste failing build output around.
-
-## Migration status
-
-Two independent migrations are in flight; a consumer can finish either first.
-
-**Build argument → BuildKit secret.** The workflow also still passes the token
-as the `GITHUB_PAT` **build argument**, so a consumer that has not migrated
-keeps building. A consumer is fixed as soon as it mounts the secret (now
-`id=github_token`, renamed from `github_pat` because it is no longer
-necessarily a PAT) and drops `ARG GITHUB_PAT` — BuildKit records a build
-argument in layer history only where the Dockerfile declares it. Migrating does
-not clean the Actions cache, so finishing the job also needs a cache purge and
-a PAT rotation.
-
-**Shared PAT → minted token.** A consumer moves the image build off `GIT_PAT`
-by setting `private-modules: true` here. On the runner side there is nothing to
-opt in to — [`actions/setup-go`](../../actions/setup-go/README.md#fetching-private-modules)
-mints on every call, so a job calling it just needs `id-token: write`. The
-asymmetry is deliberate: `setup-go` had no fallback to leave behind, whereas
-this workflow does and every consumer's image build runs through it, so
-flipping it wholesale would break builds that fetch modules fine today.
-
-`secrets.GIT_PAT` appears three times in `build-and-push.yml`, and
-`private-modules` replaces only the first:
-
-| Reference | Fate |
-|-----------|------|
-| `secrets: github_token=…` | Replaced by the minted token when `private-modules` is set. |
-| `build-args: GITHUB_PAT=…` | Stays until every consumer has finished the build-argument migration above. Deliberately not switched to the minted token — a token here is exported to the layer cache, which is the whole reason for minting one. |
-| `github-token: …` | Stays. It authenticates Buildx's own fetches, not the build, and outlives both migrations. |
 
 # `self-test-actions.yml`
 
