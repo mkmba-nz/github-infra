@@ -220,7 +220,9 @@ proceeds to the review step.
 # `build-and-push.yml`
 
 Reusable workflow that builds a Docker image with Buildx and pushes it to
-Amazon ECR, tagged with the triggering commit SHA.
+Amazon ECR, tagged with the triggering commit SHA. Each pushed tag carries a
+BuildKit provenance attestation (the action default) and an SPDX SBOM
+attestation.
 
 AWS credentials come from an OIDC role assumption (`role-to-assume`), so the
 consumer needs no static AWS keys. Layers are cached in the GitHub Actions
@@ -394,6 +396,17 @@ is the local build from [Outside CI](#outside-ci), run from a fresh clone
 
 ```bash
 docker build --secret id=github_token,env=GITHUB_PAT -t my-service .
+```
+
+### Verifying attestations
+
+Pushed tags are an OCI image index (platform image plus attestation
+manifest). Provenance is the action default; this workflow also attaches an
+SPDX SBOM. Inspect a pushed tag:
+
+```bash
+docker buildx imagetools inspect <registry>/<repo>:<sha> --format '{{ json .SBOM }}'
+docker buildx imagetools inspect <registry>/<repo>:<sha> --format '{{ json .Provenance }}'
 ```
 
 ## Fetching private modules

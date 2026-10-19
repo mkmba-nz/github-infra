@@ -134,3 +134,6 @@ jobs:
           build-args: ${{ inputs.build-args }}
           push: true
           tags: ${{ steps.login-ecr.outputs.registry }}/${{ inputs.repo-name }}:${{ github.sha }}
+          # SPDX SBOM for image-content tooling; the tag is already an OCI
+          # index from default provenance.
+          sbom: true
