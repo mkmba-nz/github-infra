@@ -7,7 +7,9 @@ name: Review Agent (shared)
 #
 #   mode: auto      - Standard pull_request-triggered review. Runs the
 #                     closed-PR and approved-head skip checks, plus
-#                     diff-hash dedupe. May exit early without reviewing.
+#                     diff-hash dedupe (a diff-hash marker counts only if
+#                     the bot submitted a review after that comment). May
+#                     exit early without reviewing.
 #
 #   mode: requested - Human-initiated re-review (typically triggered by
 #                     pull_request_review_comment). Skips all dedupe,
@@ -70,7 +72,12 @@ name: Review Agent (shared)
 #
 #   - The review bot's GraphQL author.login is the App slug without "[bot]"
 #     (GraphQL renders Bot actor logins this way) - so its own prior
-#     comments are matched against the bare slug in BOT_SLUG.
+#     comments are matched against the bare slug in BOT_SLUG. Its reviews
+#     are assumed to use the same bare slug.
+#
+#   - A diff-hash marker in a bot comment is not proof of review: the
+#     comment is written before the verdict. Dedupe pairs each marker with
+#     a bot review submitted after it and before the next marker.
 
 on:
   workflow_call:
@@ -184,13 +191,30 @@ jobs:
           fi
 
           # mode=auto: dedupe by diff hash against this bot's prior summary
-          # comments, out of the same fetch. This is jq itself rather than
-          # gh's --jq, so it takes --arg; handing --arg to gh's --jq is what
-          # left this filter broken and the dedupe dead for a year.
-          BOT_COMMENTS=$(jq -r --arg bot "$BOT_SLUG" \
-            '.comments[] | select(.author.login == $bot) | .body' <<<"$PR")
-          EXACT_MATCH=$(echo "$BOT_COMMENTS" | grep "diff-hash:$DIFF_HASH" | tail -1 || true)
-          PREVIOUS_HASH=$(echo "$BOT_COMMENTS" | grep -oP 'diff-hash:\K[a-f0-9]{64}' | tail -1 || true)
+          # comments, out of the same fetch. The summary comment is written
+          # before the verdict is submitted, so a marker alone proves nothing
+          # (a run cancelled mid-review leaves one with no review). A marker
+          # counts only when this bot submitted a review (any state) at or
+          # after its comment was created and before the bot's next marker
+          # comment was created. This is jq itself rather than gh's --jq, so
+          # it takes --arg; handing --arg to gh's --jq is what left this
+          # filter broken and the dedupe dead for a year.
+          REVIEWED_HASHES=$(jq -r --arg bot "$BOT_SLUG" '
+            [.reviews[] | select(.author.login == $bot and .submittedAt != null) | .submittedAt] as $submitted
+            | [.comments[]
+               | select(.author.login == $bot)
+               | {at: .createdAt,
+                  hash: (.body | [scan("diff-hash:([a-f0-9]{64})")] | last | first)}
+               | select(.hash != null)]
+            | sort_by(.at) as $markers
+            | [range(0; $markers | length) as $i
+               | $markers[$i] as $m
+               | (if $i + 1 < ($markers | length) then $markers[$i + 1].at else "9999" end) as $next
+               | select(any($submitted[]; . >= $m.at and . < $next))
+               | $m.hash]
+            | .[]' <<<"$PR")
+          EXACT_MATCH=$(printf '%s\n' "$REVIEWED_HASHES" | grep -Fx "$DIFF_HASH" | tail -1 || true)
+          PREVIOUS_HASH=$(printf '%s\n' "$REVIEWED_HASHES" | grep -E '^[a-f0-9]{64}$' | tail -1 || true)
 
           if [[ -n "$EXACT_MATCH" ]]; then
             echo "should_run=false" >> $GITHUB_OUTPUT
@@ -345,7 +369,8 @@ jobs:
 
             IMPORTANT: The dedupe logic reads the marker below from PR comments
             only, never from review bodies, so it must go in your summary
-            comment. Append it verbatim as the LAST line of that comment:
+            comment. The diff only counts as reviewed once you also submit a
+            review with `gh pr review`. Append it verbatim as the LAST line of that comment:
             diff-hash:${{ steps.diff.outputs.diff_hash }}
 
             ${{ inputs.extra-instructions }}
