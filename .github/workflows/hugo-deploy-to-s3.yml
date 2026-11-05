@@ -18,6 +18,9 @@ on:
       aws-role-arn:
         required: true
         type: string
+      working-directory:
+        type: string
+        default: "."
 
 permissions:
   contents: read
@@ -46,10 +49,12 @@ jobs:
       - name: Install Hugo CLI
         run: CGO_ENABLED=1 go install -tags extended,withdeploy github.com/gohugoio/hugo@latest
       - name: Install Node.js dependencies
+        working-directory: ${{ inputs.working-directory }}
         run: |
           [ -f package.json ] && npm ci || /bin/true
           [ -f themes/default/package.json ]&& cd themes/default && npm ci || /bin/true
       - name: Build with Hugo
+        working-directory: ${{ inputs.working-directory }}
         env:
           # For maximum backward compatibility with Hugo modules
           HUGO_ENVIRONMENT: ${{ inputs.environment }}
@@ -64,6 +69,7 @@ jobs:
           role-to-assume: ${{ inputs.aws-role-arn }}
           aws-region: ${{ inputs.aws-region }}
       - name: Deploy
+        working-directory: ${{ inputs.working-directory }}
         run: |
           hugo \
             -e ${{ inputs.environment }} \
