@@ -21,6 +21,12 @@ on:
       working-directory:
         type: string
         default: "."
+      hugo-version:
+        description: >-
+          Hugo version to install (e.g. 0.170.0). Empty means not supplied: use
+          .hugo-version in working-directory, then the workflow default.
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -37,6 +43,9 @@ defaults:
 jobs:
   build-and-deploy-to-s3:
     runs-on: ubuntu-latest
+    env:
+      # Used when neither the hugo-version input nor .hugo-version supplies a version
+      HUGO_DEFAULT_VERSION: "0.170.0"
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -46,13 +55,47 @@ jobs:
       - uses: mkmba-nz/github-infra/actions/setup-go@HEAD
         with:
           go-version: 1.27
+      - name: Resolve Hugo version
+        id: hugo-version
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          INPUT_VERSION: ${{ inputs.hugo-version }}
+        run: |
+          # Precedence: hugo-version input > .hugo-version file > HUGO_DEFAULT_VERSION
+          normalize() { printf '%s' "$1" | tr -d '[:space:]' | sed 's/^v//'; }
+          from_input=$(normalize "$INPUT_VERSION")
+          from_file=""
+          [ -f .hugo-version ] && from_file=$(normalize "$(cat .hugo-version)")
+          if [ -n "$from_input" ]; then
+            version=$from_input; source=input
+            if [ -n "$from_file" ] && [ "$from_file" != "$from_input" ]; then
+              echo "::warning::hugo-version input ($from_input) overrides .hugo-version ($from_file); the input wins"
+            fi
+          elif [ -n "$from_file" ]; then
+            version=$from_file; source=.hugo-version
+          else
+            version=$HUGO_DEFAULT_VERSION; source=default
+          fi
+          if ! [[ "$version" =~ ^[0-9.]+$ ]]; then
+            echo "::error::Invalid Hugo version '$version' (from $source)"
+            exit 1
+          fi
+          echo "Using Hugo $version (from $source)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Install Hugo CLI
-        run: CGO_ENABLED=1 go install -tags extended,withdeploy github.com/gohugoio/hugo@latest
+        env:
+          HUGO_VERSION: ${{ steps.hugo-version.outputs.version }}
+        # -tags extended is a no-op from Hugo v0.170 (LibSass removed) but still
+        # gives LibSass to sites that pin an earlier version.
+        run: CGO_ENABLED=1 go install -tags extended,withdeploy "github.com/gohugoio/hugo@v${HUGO_VERSION}"
       - name: Install Node.js dependencies
         working-directory: ${{ inputs.working-directory }}
         run: |
+          site_dir=$PWD
           [ -f package.json ] && npm ci || /bin/true
           [ -f themes/default/package.json ]&& cd themes/default && npm ci || /bin/true
+          # Hugo (v0.170+) finds Dart Sass (e.g. npm package sass-embedded) only on PATH
+          [ -d "$site_dir/node_modules/.bin" ] && echo "$site_dir/node_modules/.bin" >> "$GITHUB_PATH" || /bin/true
       - name: Build with Hugo
         working-directory: ${{ inputs.working-directory }}
         env:
